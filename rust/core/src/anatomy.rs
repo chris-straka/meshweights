@@ -265,8 +265,17 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
         // under one foot bone, the digits of a paw).
         let same = |a: usize, b: usize| {
             horiz(low_end(a) - low_end(b)) < 0.035 * h
-                || t.lca(a, b)
-                    .is_some_and(|c| ht(c) < 0.2 * h && (t.head(c) - low_end(a)).len().max((t.head(c) - low_end(b)).len()) < 0.2 * h)
+                || t.lca(a, b).is_some_and(|c| {
+                    // Toes of one foot meet within a foot's length along the
+                    // bones; two legs meet a leg's length up (a chibi's hips
+                    // sit low, so height alone merged its feet).
+                    let path = |x: usize| {
+                        let mut p = t.path_up(x, c);
+                        p.push(c);
+                        p.windows(2).map(|w| (t.head(w[0]) - t.head(w[1])).len()).sum::<f64>()
+                    };
+                    ht(c) < 0.2 * h && path(a).max(path(b)) < 0.12 * h
+                })
         };
         match seeds.iter_mut().find(|(s0, _)| same(*s0, j)) {
             Some((_, m)) => m.push(j),

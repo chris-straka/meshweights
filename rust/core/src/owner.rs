@@ -486,10 +486,25 @@ pub fn own_bones(model: &Model, ctx: &Ctx, w: &Weights) -> (Vec<usize>, Vec<Grou
     let vbone: Vec<usize> = (0..nv)
         .map(|v| {
             let near = ctx.geo.near[v].iter().map(|e| crate::helpers::owner(sk, e.0 as usize)).find(|&j| weighted[j]);
-            match (near, ctx.region_bone[ctx.vregion[v] as usize]) {
+            let by_distance = match (near, ctx.region_bone[ctx.vregion[v] as usize]) {
                 (Some(j), _) => j,
                 (None, Some(j)) => crate::helpers::owner(sk, j),
                 (None, None) => crate::helpers::owner(sk, ctx.geo.nearest(v).map(|e| e.0 as usize).unwrap_or(0)),
+            };
+            // Skin the artist gave mostly to the torso or head is torso or
+            // head skin, whatever the distance through the body says (a
+            // chibi's collar under a big hood read as forearm skin: KayKit's
+            // Mage, 2026-11-14). Limb-to-limb faults (a fused crotch, a
+            // poncho on a forearm) have their main weight on a limb and are
+            // judged as before.
+            match w[v].first() {
+                Some(&(j, x)) if x >= 0.6 => {
+                    let j = crate::helpers::owner(sk, j as usize);
+                    let core = matches!(anat.group.get(j), Some(Group::Torso | Group::Head));
+                    let limb_by_distance = matches!(anat.group.get(by_distance), Some(Group::Limb(_)));
+                    if core && limb_by_distance { j } else { by_distance }
+                }
+                _ => by_distance,
             }
         })
         .collect();
