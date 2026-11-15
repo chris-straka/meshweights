@@ -70,7 +70,7 @@ def main():
     ap.add_argument("--weights")
     ap.add_argument("--motionforge")
     ap.add_argument("--hero")
-    ap.add_argument("--fix-args", default="", help="extra flags for weights fix, space-separated")
+    ap.add_argument("--fix-args", default="", help="extra flags for weights fix, space-separated; {rig} becomes the rig's name")
     ap.add_argument("--compare", nargs=2)
     ap.add_argument("rigs", nargs="*")
     a = ap.parse_args()
@@ -92,7 +92,8 @@ def main():
         d = os.path.join(a.out, a.label, name)
         os.makedirs(d, exist_ok=True)
         fixed = os.path.join(d, "fixed.glb")
-        code, err = run([a.weights, "fix", raw, "--out", fixed] + a.fix_args.split(), os.path.join(d, "fix.txt"))
+        fix_args = [x.replace("{rig}", name) for x in a.fix_args.split()]
+        code, err = run([a.weights, "fix", raw, "--out", fixed] + fix_args, os.path.join(d, "fix.txt"))
         with open(os.path.join(d, "fix.err"), "w") as f:
             f.write(err)
         row = {"raw": headline(os.path.join(rd, "check.json")), "fixed": measure(d, fixed, a, pick, clipdir) if os.path.exists(fixed) else None}
