@@ -705,13 +705,20 @@ fn cmd_fix(a: &Args) -> ExitCode {
         None => None,
     };
     let mut externals = Vec::new();
-    for (k, v) in &a.flags {
-        if k == "--candidate" {
-            let p = v.as_deref().unwrap_or("");
-            match wf::scene::Model::load(Path::new(p)) {
-                Ok(m) => externals.push((Path::new(p).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), m)),
-                Err(e) => return fail(format!("--candidate {p}: {e}")),
+    let cand_paths: Vec<&str> = a.flags.iter().filter(|(k, _)| k == "--candidate").map(|(_, v)| v.as_deref().unwrap_or("")).collect();
+    let file_name = |p: &str| Path::new(p).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    for &p in &cand_paths {
+        // Named by file; by folder and file when two share a file name
+        // (heat/x.glb and voxel/x.glb), so the report says which won.
+        let mut name = file_name(p);
+        if cand_paths.iter().filter(|&&q| file_name(q) == name).count() > 1 {
+            if let Some(dir) = Path::new(p).parent().and_then(|d| d.file_name()) {
+                name = format!("{}/{name}", dir.to_string_lossy());
             }
+        }
+        match wf::scene::Model::load(Path::new(p)) {
+            Ok(m) => externals.push((name, m)),
+            Err(e) => return fail(format!("--candidate {p}: {e}")),
         }
     }
     if a.has("--skintokens") {
