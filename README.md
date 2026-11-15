@@ -98,6 +98,13 @@ evidence: [`docs/pick-and-bands.md`](docs/pick-and-bands.md).
 `--skintokens` adds the ML candidate: SkinTokens weights for the input's
 own skeleton (`skintokens skin`, sibling repo `~/Games/_blender/skintokens`,
 Rust, ~20 s on the M4; opt-in, so default runs stay byte-deterministic).
+Blender's automatic weights (bone heat) and rigforge's geodesic voxel
+weights on the input's own skeleton are candidates the same way:
+`bench/blender_weights.py IN OUT --method heat|voxel` makes them (heat
+is bound at ten times the size, since it binds nothing on a small
+figure), `--candidate OUT` offers them. Alone they tear about twice as
+much as the route's weights on the cast; as candidates they win regions
+on four of ten (docs/review-2026-11-13.md, round 3).
 On a body whose fused legs were cut apart (meshkit `tools/unfuse.py`
 records the cut in the file; see "Legs that share one shell" below) the
 fix starts from each half following its own leg, and one more candidate
