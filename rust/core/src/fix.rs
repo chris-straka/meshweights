@@ -1112,10 +1112,29 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         let re = region_energy(ctx, &ev);
         (ev, re)
     };
-    // Regions eligible for change: those with failing findings.
+    // Skin the headline sees torn in the input, on the poses or the clips:
+    // with the headline judging, it opens its region for change like a
+    // failing finding does (character line round 3: a cut body with no
+    // failing finding on the old score but a flap torn in the run got no
+    // change at all).
+    let torn0: Vec<bool> = if o.headline_guard {
+        let mut t = crate::owner::torn(model, ctx, &model.weights, false);
+        if let Some(m) = o.motion {
+            for (a, b) in t.iter_mut().zip(crate::owner::torn(model, m, &model.weights, true)) {
+                *a |= b;
+            }
+        }
+        t
+    } else {
+        vec![false; model.nverts()]
+    };
+    // Regions eligible for change: those with failing findings or torn skin.
     let nr = ctx.regions.len();
-    let failing: Vec<bool> =
+    let mut failing: Vec<bool> =
         ctx.regions.iter().map(|r| o.all_regions || rep0.findings.iter().any(|f| f.severity == "fail" && f.region == r.name)).collect();
+    for v in (0..model.nverts()).filter(|&v| torn0[v]) {
+        failing[ctx.vregion[v] as usize] = true;
+    }
     // Only the reported bad vertices (plus a margin) change; a failing
     // piece changes as a whole. The rest of a region keeps its weights.
     let mask = crate::report::finding_mask(ctx, &ev0, &rep0);
@@ -1126,6 +1145,7 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     let flagged: Vec<bool> = (0..model.nverts())
         .map(|v| {
             o.all_regions
+                || torn0[v]
                 || mask[v] & !crate::metrics::F_INTERSECT != 0
                 || strained(v)
                 || (is_piece(model, v) && failing[ctx.vregion[v] as usize])
@@ -1652,37 +1672,74 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     if o.headline_guard && cands.len() > 1 {
         let area = crate::owner::vertex_areas(model);
         let k = crate::owner::BODY_M / crate::owner::height(model);
-        let torn_area = |wt: &Weights| -> Vec<f64> {
-            let t: Vec<Vec<bool>> = groups.iter().map(|&(c, m)| crate::owner::torn(model, c, wt, m)).collect();
-            let mut a = vec![0.0; nr];
-            for v in 0..model.nverts() {
-                if t.iter().any(|x| x[v]) {
-                    a[ctx.vregion[v] as usize] += area[v] * k * k * 1e4;
-                }
-            }
-            a
+        // Torn area per region, per group (poses, clips), in cm^2.
+        let torn_area = |wt: &Weights| -> Vec<Vec<f64>> {
+            groups
+                .iter()
+                .map(|&(c, m)| {
+                    let t = crate::owner::torn(model, c, wt, m);
+                    let mut a = vec![0.0; nr];
+                    for v in (0..model.nverts()).filter(|&v| t[v]) {
+                        a[ctx.vregion[v] as usize] += area[v] * k * k * 1e4;
+                    }
+                    a
+                })
+                .collect()
         };
+        let sum_r = |a: &[Vec<f64>], r: usize| a.iter().map(|g| g[r]).sum::<f64>();
+        let total = |a: &[Vec<f64>], g: usize| a[g].iter().sum::<f64>();
         let cur_a = torn_area(&w);
-        if cur_a.iter().any(|&x| x > 0.0) {
-            let cand_a: Vec<Vec<f64>> = cands.iter().map(|c| torn_area(&c.w)).collect();
+        if (0..nr).any(|r| sum_r(&cur_a, r) > 0.0) {
+            let cand_a: Vec<Vec<Vec<f64>>> = cands.iter().map(|c| torn_area(&c.w)).collect();
+            // A region takes the candidate tearing least there, summed over
+            // the groups, if that is clearly less and no group tears more
+            // there (the fix must not trade the clips for the poses).
             let mut pick = vec![0usize; nr];
             for r in 0..nr {
-                if cur_a[r] <= 0.0 {
+                let cur = sum_r(&cur_a, r);
+                if cur <= 0.0 {
                     continue;
                 }
-                let (bi, ba) =
-                    cand_a.iter().enumerate().map(|(i, a)| (i, a[r])).fold((usize::MAX, f64::MAX), |b, x| if x.1 < b.1 { x } else { b });
-                if bi != usize::MAX && ba + (0.1 * cur_a[r]).max(2.0) < cur_a[r] {
-                    pick[r] = bi + 1;
+                let best = cand_a
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| (0..groups.len()).all(|g| a[g][r] <= cur_a[g][r] + 1e-9))
+                    .map(|(i, a)| (i, sum_r(a, r)))
+                    .fold((usize::MAX, f64::MAX), |b, x| if x.1 < b.1 { x } else { b });
+                if best.0 != usize::MAX && best.1 + (0.1 * cur).max(2.0) < cur {
+                    pick[r] = best.0 + 1;
                 }
             }
-            if pick.iter().any(|&p| p > 0) {
-                let mut with_cur = vec![Candidate { name: "current".into(), w: w.clone(), region_e: Vec::new() }];
-                with_cur.extend(cands.iter().map(|c| Candidate { name: c.name.clone(), w: c.w.clone(), region_e: Vec::new() }));
-                let all = vec![true; model.nverts()];
+            let mut with_cur = vec![Candidate { name: "current".into(), w: w.clone(), region_e: Vec::new() }];
+            with_cur.extend(cands.iter().map(|c| Candidate { name: c.name.clone(), w: c.w.clone(), region_e: Vec::new() }));
+            let all = vec![true; model.nverts()];
+            // Blended at the seams, regions interact: while a group tears
+            // more in all than the input, the pick that adds most to it
+            // there goes back.
+            while pick.iter().any(|&p| p > 0) {
                 let w2 = blend(model, ctx, &with_cur, &pick, &all, seam);
                 let after = torn_area(&w2);
-                if after.iter().sum::<f64>() + 2.0 < cur_a.iter().sum::<f64>() {
+                let worse = (0..groups.len()).find(|&g| total(&after, g) > total(&cur_a, g) + 1e-9);
+                if let Some(g) = worse {
+                    let r = (0..nr)
+                        .filter(|&r| pick[r] > 0)
+                        .max_by(|&a, &b| (after[g][a] - cur_a[g][a]).total_cmp(&(after[g][b] - cur_a[g][b])).then(b.cmp(&a)))
+                        .unwrap();
+                    pick[r] = 0;
+                    continue;
+                }
+                let (sa, sc) =
+                    ((0..groups.len()).map(|g| total(&after, g)).sum::<f64>(), (0..groups.len()).map(|g| total(&cur_a, g)).sum::<f64>());
+                if std::env::var_os("WF_DEBUG").is_some() {
+                    let tin = torn_area(&model.weights);
+                    eprintln!(
+                        "headline choice totals: input {:?}, pick {:?}, choice {:?}",
+                        (0..groups.len()).map(|g| total(&tin, g)).collect::<Vec<_>>(),
+                        (0..groups.len()).map(|g| total(&cur_a, g)).collect::<Vec<_>>(),
+                        (0..groups.len()).map(|g| total(&after, g)).collect::<Vec<_>>()
+                    );
+                }
+                if sa + 2.0 < sc {
                     if std::env::var_os("WF_DEBUG").is_some() {
                         let names: Vec<String> = (0..nr)
                             .filter(|&r| pick[r] > 0)
@@ -1699,6 +1756,7 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                     ev = evaluate(model, ctx, &w);
                     rep1 = build(file, model, ctx, &ev);
                 }
+                break;
             }
         }
     }

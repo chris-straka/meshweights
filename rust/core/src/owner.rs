@@ -976,28 +976,36 @@ pub fn guard(model: &Model, groups: &[(&Ctx, bool)], input: &Weights, output: &W
     let area = vertex_areas(model);
     let k = BODY_M / height(model);
     let nr = rctx.regions.len();
-    let per_region = |t: &[Vec<bool>]| -> Vec<f64> {
-        let mut a = vec![0.0; nr];
-        for v in 0..model.nverts() {
-            if t.iter().any(|x| x[v]) {
-                a[rctx.vregion[v] as usize] += area[v] * k * k * 1e4;
-            }
-        }
-        a
+    // Torn area per group (poses, clips), per region: each group is judged
+    // on its own, as the fix's never-worse check does (round 3: judged as
+    // one union, a fix that tore less on both could still be refused, and
+    // one that traded the clips for the poses kept).
+    let per_region = |w: &Weights| -> Vec<Vec<f64>> {
+        groups
+            .iter()
+            .map(|&(c, m)| {
+                let t = torn(model, c, w, m);
+                let mut a = vec![0.0; nr];
+                for v in (0..model.nverts()).filter(|&v| t[v]) {
+                    a[rctx.vregion[v] as usize] += area[v] * k * k * 1e4;
+                }
+                a
+            })
+            .collect()
     };
-    let tin: Vec<Vec<bool>> = groups.iter().map(|&(c, m)| torn(model, c, input, m)).collect();
-    let ain = per_region(&tin);
+    let total = |a: &[Vec<f64>]| -> Vec<f64> { a.iter().map(|g| g.iter().sum::<f64>()).collect() };
+    let ain = per_region(input);
+    let tin = total(&ain);
+    let worse_whole = |a: &[Vec<f64>]| total(a).iter().zip(&tin).any(|(x, y)| *x > *y + 1e-9);
+    let everything = || (input.clone(), vec!["everything (the whole tore more than the input)".into()]);
+    let aout = per_region(output);
     let mut cur = output.clone();
     let mut back = vec![false; nr];
     for _ in 0..6 {
-        let tc: Vec<Vec<bool>> = groups.iter().map(|&(c, m)| torn(model, c, &cur, m)).collect();
-        let ac = per_region(&tc);
-        let worse: Vec<usize> = (0..nr).filter(|&r| !back[r] && ac[r] > ain[r] + (0.1 * ain[r]).max(2.0)).collect();
+        let ac = per_region(&cur);
+        let worse: Vec<usize> =
+            (0..nr).filter(|&r| !back[r] && ac.iter().zip(&ain).any(|(c, i)| c[r] > i[r] + (0.1 * i[r]).max(2.0))).collect();
         if worse.is_empty() {
-            let total = |a: &[f64]| a.iter().sum::<f64>();
-            if total(&ac) > total(&ain) + 2.0 {
-                return (input.clone(), vec!["everything (the whole tore more than the input)".into()]);
-            }
             break;
         }
         for &r in &worse {
@@ -1009,11 +1017,19 @@ pub fn guard(model: &Model, groups: &[(&Ctx, bool)], input: &Weights, output: &W
             }
         }
     }
-    // The last round's change is judged too (review 2026-11-13).
-    let tc: Vec<Vec<bool>> = groups.iter().map(|&(c, m)| torn(model, c, &cur, m)).collect();
-    if per_region(&tc).iter().sum::<f64>() > ain.iter().sum::<f64>() + 2.0 {
-        return (input.clone(), vec!["everything (the whole tore more than the input)".into()]);
+    // The last round's change is judged too (review 2026-11-13). Regions
+    // put back without a seam can tear where they meet the rest (round 3,
+    // the cut messenger: 248/354 cm2 became 294/398): then the output as
+    // it was stands, if it is no worse than the input as a whole.
+    if !back.iter().any(|&b| b) {
+        return if worse_whole(&aout) { everything() } else { (cur, Vec::new()) };
     }
-    let names = (0..nr).filter(|&r| back[r]).map(|r| rctx.regions[r].label.clone()).collect();
-    (cur, names)
+    if !worse_whole(&per_region(&cur)) {
+        let names = (0..nr).filter(|&r| back[r]).map(|r| rctx.regions[r].label.clone()).collect();
+        return (cur, names);
+    }
+    if !worse_whole(&aout) {
+        return (output.clone(), Vec::new());
+    }
+    everything()
 }
