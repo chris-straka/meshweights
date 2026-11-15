@@ -128,6 +128,11 @@ pub struct FixReport {
     pub regions: Vec<RegionChoice>,
     pub findings_before: Vec<crate::report::Finding>,
     pub findings_after: Vec<crate::report::Finding>,
+    /// Tears (% of the surface in failing headline findings) per pose
+    /// group, before and after; empty with `--no-headline-guard`. The fix
+    /// never returns more than the input on any group.
+    pub tears_before: BTreeMap<String, f64>,
+    pub tears_after: BTreeMap<String, f64>,
 }
 
 pub struct FixResult {
@@ -586,6 +591,94 @@ pub fn joint_bands(model: &Model, ctx: &Ctx) -> Weights {
     let body: Vec<bool> = (0..model.nverts()).map(|v| !is_piece(model, v)).collect();
     let w = prune_all(&smooth(model, &w, &body, 0, 0.5));
     prune_all(&pieces_from_body(model, ctx, &w))
+}
+
+/// Skin weighted to a bone it does not belong to (the check's wrong-bone
+/// rule: a poncho panel on the forearm, a thigh on the other thigh) keeps
+/// only its own bones' weights, then two smoothing passes over the changed
+/// patch. The region choice keeps it where it tears less.
+pub fn own_bones(model: &Model, ctx: &Ctx) -> Weights {
+    let (_, _, foreign) = crate::owner::own_bones(model, ctx, &model.weights);
+    let mut w = model.weights.clone();
+    let mut changed = vec![false; model.nverts()];
+    for (v, f) in foreign.into_iter().enumerate() {
+        if let Some((home, _)) = f {
+            w[v] = home;
+            changed[v] = true;
+        }
+    }
+    if !changed.iter().any(|&c| c) {
+        return w;
+    }
+    let patch = dilate(model, &changed, 1);
+    prune_all(&smooth(model, &w, &patch, 2, 0.5))
+}
+
+/// The fused crotch (every generated cast rig: inner-thigh skin moving with
+/// the other thigh, 7-47 cm): on a leg's skin, weight on the other leg
+/// (its thigh and everything under it) goes to the pelvis instead, then two
+/// smoothing passes over the changed patch. The skin bridging the legs
+/// rides the pelvis rather than being torn between two thighs. Humanoids
+/// with both thighs and a hips joint only.
+pub fn crotch_to_pelvis(model: &Model) -> Option<Weights> {
+    let sk = &model.skel;
+    let a = &sk.anatomy;
+    let hips = *a.roles.get("hips")?.first()? as u32;
+    let thigh = [*a.roles.get("thigh.L")?.first()? as u32, *a.roles.get("thigh.R")?.first()? as u32];
+    let leg_of = |j: usize| -> Option<usize> {
+        match &a.group[crate::helpers::owner(sk, j)] {
+            crate::anatomy::Group::Limb(n) if n == "leg.L" => Some(0),
+            crate::anatomy::Group::Limb(n) if n == "leg.R" => Some(1),
+            _ => None,
+        }
+    };
+    let left = a.up.cross(a.forward).normalized();
+    let mid = sk.head[hips as usize].dot(left);
+    // Half the gap between the hip joints: the band a fused crotch spans.
+    let half = 0.5 * (sk.head[thigh[0] as usize] - sk.head[thigh[1] as usize]).dot(left).abs();
+    if half <= 0.0 {
+        return None;
+    }
+    let top_y = sk.head[thigh[0] as usize].y.max(sk.head[thigh[1] as usize].y);
+    let mut changed = vec![false; model.nverts()];
+    let mut w: Weights = model.weights.clone();
+    for v in 0..model.nverts() {
+        if model.rigid[v] || model.rest[v].y > top_y {
+            continue;
+        }
+        if !w[v].iter().any(|&(j, _)| leg_of(j as usize).is_some()) {
+            continue;
+        }
+        // The leg it belongs to: the side of the body it is on.
+        let lat = model.rest[v].dot(left) - mid;
+        let own = if lat >= 0.0 { 0 } else { 1 };
+        let mut other = 0.0;
+        let mut keep: VW = Vec::new();
+        for &(j, x) in &w[v] {
+            if leg_of(j as usize).is_some_and(|l| l != own) {
+                other += x;
+            } else {
+                keep.push((j, x));
+            }
+        }
+        if other <= 0.0 {
+            continue;
+        }
+        // Inside the band a smooth share goes to the pelvis and the other
+        // thigh keeps the rest, fading to nothing at the band's edge; beyond
+        // it, all to the pelvis.
+        let t = (lat.abs() / half).clamp(0.0, 1.0);
+        let stay = 0.5 * (1.0 - t * t * (3.0 - 2.0 * t));
+        keep.push((thigh[1 - own], other * stay));
+        keep.push((hips, other * (1.0 - stay)));
+        w[v] = normalize_vw(keep);
+        changed[v] = true;
+    }
+    if !changed.iter().any(|&c| c) {
+        return None;
+    }
+    let patch = dilate(model, &changed, 1);
+    Some(prune_all(&smooth(model, &w, &patch, 2, 0.5)))
 }
 
 /// One side's weights mirrored onto the other (`from_left`: the left
@@ -1121,6 +1214,10 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                 // strip 64/23 between the thighs); the region pick and the
                 // headline choose the better side per region.
                 if o.headline_guard {
+                    push("own-bones".into(), own_bones(model, ctx), &mut cands);
+                    if let Some(w) = crotch_to_pelvis(model) {
+                        push("crotch-to-pelvis".into(), w, &mut cands);
+                    }
                     for (name, from_left) in [("mirror-left", true), ("mirror-right", false)] {
                         if let Some(w) = mirror(model, from_left) {
                             push(name.into(), w, &mut cands);
@@ -1630,11 +1727,41 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         rep1 = build(file, model, ctx, &ev);
         choice = vec![0; nr];
     }
+    // Never worse than the input on what the check reports: if the result
+    // tears more skin than the input on the clips or on the poses (any
+    // amount), the input comes back (character line round 3: a fix kept a
+    // worse rig, 2026-11-14).
+    let area = crate::owner::vertex_areas(model);
+    let total_area: f64 = area.iter().sum::<f64>().max(1e-12);
+    let tears_pct = |wt: &Weights| -> Vec<f64> {
+        groups
+            .iter()
+            .map(|&(c, m)| {
+                let t = crate::owner::torn(model, c, wt, m);
+                (0..model.nverts()).filter(|&v| t[v]).map(|v| area[v]).sum::<f64>() / total_area * 100.0
+            })
+            .collect()
+    };
+    let mut tears = (Vec::new(), Vec::new());
+    if o.headline_guard {
+        let tin = tears_pct(&model.weights);
+        let mut tout = if w == model.weights { tin.clone() } else { tears_pct(&w) };
+        if tout.iter().zip(&tin).any(|(a, b)| *a > *b + 1e-9) {
+            if std::env::var_os("WF_DEBUG").is_some() {
+                eprintln!("never worse: tears {tout:?} against the input's {tin:?}; the input comes back");
+            }
+            w = model.weights.clone();
+            ev = evaluate(model, ctx, &w);
+            rep1 = build(file, model, ctx, &ev);
+            choice = vec![0; nr];
+            tout = tin.clone();
+        }
+        tears = (tin, tout);
+    }
+    let names: Vec<String> = groups.iter().map(|&(_, m)| if m { "game clips".to_string() } else { "poses".to_string() }).collect();
     let torn_cm2 = o.headline_guard.then(|| {
-        let area = crate::owner::vertex_areas(model);
         let k = crate::owner::BODY_M / crate::owner::height(model);
-        let t: Vec<Vec<bool>> = groups.iter().map(|&(c, m)| crate::owner::torn(model, c, &w, m)).collect();
-        (0..model.nverts()).filter(|&v| t.iter().any(|x| x[v])).map(|v| area[v]).sum::<f64>() * k * k * 1e4
+        tears.1.iter().sum::<f64>() / 100.0 * total_area * k * k * 1e4
     });
 
     let re1 = region_energy(ctx, &ev);
@@ -1657,7 +1784,11 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         methods: o.methods.iter().map(|m| m.name().to_string()).chain(o.external.iter().map(|e| format!("external:{}", e.0))).collect(),
         before: summary(&rep0),
         after: summary(&rep1),
-        improved: rep1.score > rep0.score,
+        improved: if tears.0.is_empty() {
+            rep1.score > rep0.score
+        } else {
+            tears.1.iter().sum::<f64>() + 1e-9 < tears.0.iter().sum::<f64>()
+        },
         pick_exact: exact,
         external_kept: !o.external.is_empty(),
         verts_changed: changes.iter().filter(|&&c| c > 1e-4).count(),
@@ -1673,6 +1804,8 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         regions,
         findings_before: rep0.findings.clone(),
         findings_after: rep1.findings.clone(),
+        tears_before: names.iter().cloned().zip(tears.0.iter().map(|x| (x * 100.0).round() / 100.0)).collect(),
+        tears_after: names.iter().cloned().zip(tears.1.iter().map(|x| (x * 100.0).round() / 100.0)).collect(),
     };
     FixResult { weights: w, eval: ev, report_before: rep0, report_after: rep1, fix, torn_cm2 }
 }

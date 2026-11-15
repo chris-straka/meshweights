@@ -803,6 +803,11 @@ fn cmd_fix(a: &Args) -> ExitCode {
         f.after.fails,
         f.verts_changed
     );
+    if !f.tears_before.is_empty() {
+        let line: Vec<String> =
+            f.tears_before.iter().map(|(k, b)| format!("{k} {b:.2}% -> {:.2}%", f.tears_after.get(k).copied().unwrap_or(*b))).collect();
+        println!("  torn: {}", line.join(", "));
+    }
     for r in f.regions.iter().filter(|r| r.chosen != "original") {
         println!("  {:<24} {:>5.1} -> {:>5.1}  via {}", r.label, r.before, r.after, r.chosen);
     }

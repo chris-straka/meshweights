@@ -463,28 +463,13 @@ fn areas(model: &Model, flagged: &[bool]) -> Vec<Vec<u32>> {
     out
 }
 
-/// The headline for one pose group. `motion`: these are the game's clips
-/// (a limb through another fails there; in range-of-motion extremes it is
-/// a warning, full bends poke). `rep`/`ev`: the check of the same poses.
-#[allow(clippy::too_many_arguments)]
-pub fn assess(
-    model: &Model,
-    ctx: &Ctx,
-    ev: &Eval,
-    rep: &Report,
-    w: &Weights,
-    motion: bool,
-    name: &str,
-    clips: Vec<String>,
-    source: String,
-) -> Section {
-    let th = Thresholds::default();
+/// Each vertex's own bone and group, and where a vertex carries weight on
+/// a bone it does not belong to (the `wrong_bone` rule), its weights on its
+/// own bones alone (normalized) and the foreign bone with most weight.
+#[allow(clippy::type_complexity)]
+pub fn own_bones(model: &Model, ctx: &Ctx, w: &Weights) -> (Vec<usize>, Vec<Group>, Vec<Option<(Vec<(u32, f64)>, u32)>>) {
     let nv = model.nverts();
     let h = height(model);
-    let k = BODY_M / h; // metres on the model -> metres on a 1.75 m body
-    let varea = vertex_areas(model);
-    let total_area: f64 = varea.iter().sum::<f64>().max(1e-12);
-    let cm2 = |vs: &[u32]| vs.iter().map(|&v| varea[v as usize]).sum::<f64>() * k * k * 1e4;
     let sk = &model.skel;
     let anat = &sk.anatomy;
     // Each vertex's bone: the nearest by distance through the body that
@@ -582,6 +567,35 @@ pub fn assess(
             foreign[v] = Some((crate::scene::normalize_vw(home), fb));
         }
     }
+    (vbone, vgroup, foreign)
+}
+
+/// The headline for one pose group. `motion`: these are the game's clips
+/// (a limb through another fails there; in range-of-motion extremes it is
+/// a warning, full bends poke). `rep`/`ev`: the check of the same poses.
+#[allow(clippy::too_many_arguments)]
+pub fn assess(
+    model: &Model,
+    ctx: &Ctx,
+    ev: &Eval,
+    rep: &Report,
+    w: &Weights,
+    motion: bool,
+    name: &str,
+    clips: Vec<String>,
+    source: String,
+) -> Section {
+    let th = Thresholds::default();
+    let nv = model.nverts();
+    let h = height(model);
+    let k = BODY_M / h; // metres on the model -> metres on a 1.75 m body
+    let varea = vertex_areas(model);
+    let total_area: f64 = varea.iter().sum::<f64>().max(1e-12);
+    let cm2 = |vs: &[u32]| vs.iter().map(|&v| varea[v as usize]).sum::<f64>() * k * k * 1e4;
+    let sk = &model.skel;
+    let anat = &sk.anatomy;
+    let (vbone, vgroup, foreign) = own_bones(model, ctx, w);
+
     // ---- candidates: not following (mid-limb, round the limb).
     let limb_roles = ["upper_arm.L", "upper_arm.R", "forearm.L", "forearm.R", "thigh.L", "thigh.R", "shin.L", "shin.R"];
     let limb_bones: Vec<usize> = limb_roles.iter().filter_map(|r| anat.roles.get(*r).map(|v| v[0])).collect();
