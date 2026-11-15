@@ -1024,12 +1024,19 @@ pub fn guard(model: &Model, groups: &[(&Ctx, bool)], input: &Weights, output: &W
     if !back.iter().any(|&b| b) {
         return if worse_whole(&aout) { everything() } else { (cur, Vec::new()) };
     }
-    if !worse_whole(&per_region(&cur)) {
-        let names = (0..nr).filter(|&r| back[r]).map(|r| rctx.regions[r].label.clone()).collect();
-        return (cur, names);
+    // Of the two that are no worse than the input as a whole, the one
+    // tearing less in all stands (round 3, Pum cut: putting back two
+    // regions that got worse on one group took the clips from 0.33 to
+    // 0.74 %).
+    let acur = per_region(&cur);
+    let sum = |a: &[Vec<f64>]| total(a).iter().sum::<f64>();
+    match (!worse_whole(&acur), !worse_whole(&aout)) {
+        (true, true) if sum(&aout) < sum(&acur) => (output.clone(), Vec::new()),
+        (true, _) => {
+            let names = (0..nr).filter(|&r| back[r]).map(|r| rctx.regions[r].label.clone()).collect();
+            (cur, names)
+        }
+        (false, true) => (output.clone(), Vec::new()),
+        (false, false) => everything(),
     }
-    if !worse_whole(&aout) {
-        return (output.clone(), Vec::new());
-    }
-    everything()
 }

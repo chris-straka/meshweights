@@ -1694,46 +1694,62 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
             let tin = &cand_a[0];
             debug_assert_eq!(cands[0].name, "original");
             let worse_than_input = |a: &[Vec<f64>]| (0..groups.len()).any(|g| total(a, g) > total(tin, g) + 1e-9);
-            // A region takes the candidate tearing least there, summed over
-            // the groups, if that is clearly less than now.
-            let mut pick = vec![0usize; nr];
-            for r in 0..nr {
-                let cur = sum_r(&cur_a, r);
-                if cur <= 0.0 {
-                    continue;
-                }
-                let best = cand_a
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| (i, sum_r(a, r)))
-                    .fold((usize::MAX, f64::MAX), |b, x| if x.1 < b.1 { x } else { b });
-                if best.0 != usize::MAX && best.1 + (0.1 * cur).max(2.0) < cur {
-                    pick[r] = best.0 + 1;
-                }
-            }
             let mut with_cur = vec![Candidate { name: "current".into(), w: w.clone(), region_e: Vec::new() }];
             with_cur.extend(cands.iter().map(|c| Candidate { name: c.name.clone(), w: c.w.clone(), region_e: Vec::new() }));
             let all = vec![true; model.nverts()];
-            // No group (poses, clips) may tear more in all than the input:
-            // the fix must not trade one for the other. Blended at the
-            // seams, regions interact; while a group tears more than the
-            // input, the region adding most to it over the input's takes
-            // the input's weights.
             let original = 1;
-            for _ in 0..=nr {
-                let w2 = blend(model, ctx, &with_cur, &pick, &all, seam);
-                let after = torn_area(&w2);
-                if let Some(g) = (0..groups.len()).find(|&g| total(&after, g) > total(tin, g) + 1e-9) {
-                    let back = (0..nr)
-                        .filter(|&r| pick[r] != original && after[g][r] > tin[g][r])
-                        .max_by(|&a, &b| (after[g][a] - tin[g][a]).total_cmp(&(after[g][b] - tin[g][b])).then(b.cmp(&a)));
-                    if let Some(r) = back {
-                        pick[r] = original;
+            let sum_all = |a: &[Vec<f64>]| (0..groups.len()).map(|g| total(a, g)).sum::<f64>();
+            // A region takes the candidate tearing least there, summed over
+            // the groups, if that is clearly less than now; `strict` also
+            // asks that no group tear more there than now. Blended at the
+            // seams, regions interact: while a group (poses, clips) tears
+            // more in all than the input, the region adding most to it over
+            // the input's takes the input's weights (the fix must not trade
+            // one for the other). Both ways are tried and the one tearing
+            // least kept (round 3: strict won on Pum cut, 0.33 against
+            // 0.67 % on the clips; loose on Maeva, whose pick tore more than
+            // the input).
+            let choose = |strict: bool| -> Option<(Vec<usize>, Weights, Vec<Vec<f64>>)> {
+                let mut pick = vec![0usize; nr];
+                for r in 0..nr {
+                    let cur = sum_r(&cur_a, r);
+                    if cur <= 0.0 {
                         continue;
                     }
-                    break;
+                    let best = cand_a
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, a)| !strict || (0..groups.len()).all(|g| a[g][r] <= cur_a[g][r] + 1e-9))
+                        .map(|(i, a)| (i, sum_r(a, r)))
+                        .fold((usize::MAX, f64::MAX), |b, x| if x.1 < b.1 { x } else { b });
+                    if best.0 != usize::MAX && best.1 + (0.1 * cur).max(2.0) < cur {
+                        pick[r] = best.0 + 1;
+                    }
                 }
-                let sum_all = |a: &[Vec<f64>]| (0..groups.len()).map(|g| total(a, g)).sum::<f64>();
+                for _ in 0..=nr {
+                    if !pick.iter().any(|&p| p > 0) {
+                        return None;
+                    }
+                    let w2 = blend(model, ctx, &with_cur, &pick, &all, seam);
+                    let after = torn_area(&w2);
+                    if let Some(g) = (0..groups.len()).find(|&g| total(&after, g) > total(tin, g) + 1e-9) {
+                        let back = (0..nr)
+                            .filter(|&r| pick[r] != original && after[g][r] > tin[g][r])
+                            .max_by(|&a, &b| (after[g][a] - tin[g][a]).total_cmp(&(after[g][b] - tin[g][b])).then(b.cmp(&a)));
+                        match back {
+                            Some(r) => {
+                                pick[r] = original;
+                                continue;
+                            }
+                            None => return None,
+                        }
+                    }
+                    return (worse_than_input(&cur_a) || sum_all(&after) + 2.0 < sum_all(&cur_a)).then_some((pick, w2, after));
+                }
+                None
+            };
+            let best = [choose(true), choose(false)].into_iter().flatten().min_by(|a, b| sum_all(&a.2).total_cmp(&sum_all(&b.2)));
+            if let Some((pick, w2, after)) = best {
                 if std::env::var_os("WF_DEBUG").is_some() {
                     eprintln!(
                         "headline choice totals: input {:?}, pick {:?}, choice {:?}",
@@ -1741,25 +1757,20 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                         (0..groups.len()).map(|g| total(&cur_a, g)).collect::<Vec<_>>(),
                         (0..groups.len()).map(|g| total(&after, g)).collect::<Vec<_>>()
                     );
+                    let names: Vec<String> = (0..nr)
+                        .filter(|&r| pick[r] > 0)
+                        .map(|r| format!("{} <- {}", ctx.regions[r].label, cands[pick[r] - 1].name))
+                        .collect();
+                    eprintln!("headline choice: {}", names.join(", "));
                 }
-                if pick.iter().any(|&p| p > 0) && (worse_than_input(&cur_a) || sum_all(&after) + 2.0 < sum_all(&cur_a)) {
-                    if std::env::var_os("WF_DEBUG").is_some() {
-                        let names: Vec<String> = (0..nr)
-                            .filter(|&r| pick[r] > 0)
-                            .map(|r| format!("{} <- {}", ctx.regions[r].label, cands[pick[r] - 1].name))
-                            .collect();
-                        eprintln!("headline choice: {}", names.join(", "));
+                for r in 0..nr {
+                    if pick[r] > 0 {
+                        choice[r] = pick[r] - 1;
                     }
-                    for r in 0..nr {
-                        if pick[r] > 0 {
-                            choice[r] = pick[r] - 1;
-                        }
-                    }
-                    w = w2;
-                    ev = evaluate(model, ctx, &w);
-                    rep1 = build(file, model, ctx, &ev);
                 }
-                break;
+                w = w2;
+                ev = evaluate(model, ctx, &w);
+                rep1 = build(file, model, ctx, &ev);
             }
         }
     }
