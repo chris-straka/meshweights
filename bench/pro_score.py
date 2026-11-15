@@ -79,8 +79,10 @@ def main():
             if not os.path.exists(std):
                 code, err = run([a.motionforge, "standardize", "--input", pro, "--output", std])
                 if code != 0:
-                    print(f"{rig}: standardize failed: {err[-300:]}", flush=True)
-                    continue
+                    # Standardize reads Rigify names only (VRM, CesiumMan,
+                    # the knight fail): such a rig is scored as it is.
+                    print(f"{rig}: not standardized ({err.strip()[-160:]}); scored as it is", flush=True)
+                    std = pro
             pro = std
         st = os.path.join(inputs, f"{rig}.st.glb")
         if not os.path.exists(st):
