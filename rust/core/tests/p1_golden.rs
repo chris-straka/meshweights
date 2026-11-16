@@ -46,7 +46,7 @@ fn fails(r: &Report) -> usize {
 fn sheet_bleed_golden() {
     let (m, ctx, ev, rep) = load("bleed");
     let mask = finding_mask(&ctx, &ev, &rep);
-    let info = SheetInfo { title: &rep.file, mask: &mask, score: rep.score, pass: rep.pass, fails: fails(&rep) };
+    let info = SheetInfo { title: &rep.file, mask: &mask, score: rep.score, tears: 0.0, pass: rep.pass, fails: fails(&rep) };
     let img = sheet(&m, &ctx, &ev, &m.weights, &info, &SheetOpts::default());
     check_golden("sheet_bleed.png", &img.png_bytes());
 }
@@ -61,14 +61,14 @@ fn compare_cape_golden() {
         ctx: &ca,
         ev: &ea,
         w: &ma.weights,
-        info: SheetInfo { title: &ra.file, mask: &ka, score: ra.score, pass: ra.pass, fails: fails(&ra) },
+        info: SheetInfo { title: &ra.file, mask: &ka, score: ra.score, tears: 0.0, pass: ra.pass, fails: fails(&ra) },
     };
     let sb = Side {
         model: &mb,
         ctx: &cb,
         ev: &eb,
         w: &mb.weights,
-        info: SheetInfo { title: &rb.file, mask: &kb, score: rb.score, pass: rb.pass, fails: fails(&rb) },
+        info: SheetInfo { title: &rb.file, mask: &kb, score: rb.score, tears: 0.0, pass: rb.pass, fails: fails(&rb) },
     };
     let img = compare(&sa, &sb, &SheetOpts::default());
     check_golden("compare_clean_vs_cape.png", &img.png_bytes());

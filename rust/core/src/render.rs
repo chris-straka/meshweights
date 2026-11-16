@@ -309,6 +309,10 @@ pub struct SheetInfo<'a> {
     /// Per-vertex flags to paint (see `report::finding_mask`).
     pub mask: &'a [u8],
     pub score: f64,
+    /// The headline measure: percent of the surface torn (owner.rs, on
+    /// this sheet's pose group). The zoomed compare's verdict is by
+    /// pass, then tears; the 0-100 score is used only where it agrees.
+    pub tears: f64,
     pub pass: bool,
     pub fails: usize,
 }
@@ -757,15 +761,31 @@ fn heat_faces(tris: &[[u32; 3]], energy: &[f64]) -> Vec<([f64; 3], f64)> {
 }
 
 /// The line that says which rig is better and by how much, and the
-/// numbers behind it. Weightforge ranks rigs by the gate first, then the
-/// score (as `fix` ranks its candidates); the higher score with more
-/// failing findings is called mixed.
+/// numbers behind it. The verdict is by the gate first, then by tears:
+/// the share of the surface torn, which is what a person watching the
+/// character notices. The old 0-100 score is kept only where it agrees
+/// with tears; where it points the other way its verdict is retired
+/// on this sheet (named in the headline, shown in the detail line).
 pub fn zoom_headline(a: &SheetInfo, b: &SheetInfo, label_a: &str, label_b: &str, bad_a: usize, bad_b: usize) -> (String, String) {
-    let b_wins = if a.pass != b.pass { b.pass } else { b.score > a.score };
+    // Below this, two tears numbers are the same measure.
+    const TEARS_EPS: f64 = 0.05;
+    let tears_decide = (a.tears - b.tears).abs() > TEARS_EPS;
+    let b_wins = if a.pass != b.pass {
+        b.pass
+    } else if tears_decide {
+        b.tears < a.tears
+    } else {
+        b.score > a.score
+    };
     let ((w, wl, wb), (l, ll, lb)) =
         if b_wins { ((b, label_b, bad_b), (a, label_a, bad_a)) } else { ((a, label_a, bad_a), (b, label_b, bad_b)) };
+    let score_points_other_way = w.pass == l.pass && tears_decide && w.score < l.score - 1.0;
     let head = if w.pass != l.pass {
         format!("{wl} PASSES THE GATE, {ll} DOES NOT")
+    } else if tears_decide && score_points_other_way {
+        format!("{wl} TEARS LESS, {:.2}% VS {:.2}% TORN; SCORE RETIRED", w.tears, l.tears)
+    } else if tears_decide {
+        format!("{wl} TEARS LESS: {:.2}% VS {:.2}% TORN", w.tears, l.tears)
     } else if (w.score - l.score).abs() < 1.0 {
         format!("ABOUT EVEN: {wl} {:.1}, {ll} {:.1} OUT OF 100", w.score, l.score)
     } else if w.fails > l.fails {
@@ -774,7 +794,11 @@ pub fn zoom_headline(a: &SheetInfo, b: &SheetInfo, label_a: &str, label_b: &str,
     } else {
         format!("{wl} IS BETTER: {:.1} VS {:.1} OUT OF 100", w.score, l.score)
     };
-    let detail = format!("{wl} VS {ll}: FAILING FINDINGS {} VS {}, BAD VERTS OVER ALL POSES {} VS {}", w.fails, l.fails, wb, lb);
+    let score_note = if score_points_other_way { "RETIRED" } else { "KEPT" };
+    let detail = format!(
+        "TORN {:.2}% VS {:.2}%. SCORE {:.1} VS {:.1} ({score_note}). FAILS {} VS {}. BAD VERTS {} VS {}",
+        w.tears, l.tears, w.score, l.score, w.fails, l.fails, wb, lb
+    );
     (head, detail)
 }
 
@@ -1028,7 +1052,7 @@ pub fn compare_zoom(a: &Side, b: &Side, o: &ZoomOpts) -> Image {
     // Where the score goes: every vertex's deformation energy over all
     // poses (speckled and bleeding weights included), whole figure at rest.
     let y = ZHEADER + views.len().max(1) * (ZROW + o.cell_h);
-    img.text(12, y + 10, "WHERE EACH RIG LOSES ITS SCORE", 3, FG);
+    img.text(12, y + 10, "WHERE EACH RIG'S SKIN STRAINS", 3, FG);
     img.text(12, y + 40, "ALL POSES TOGETHER, ONE SCALE FOR BOTH: GREY IS CLEAN, YELLOW STRAINED, RED BROKEN", 2, DIM);
     let view = View::default();
     for k in 0..2 {
@@ -1202,16 +1226,25 @@ mod tests {
     #[test]
     fn the_headline_names_the_better_rig() {
         let mask = [];
-        let info = |score, pass, fails| SheetInfo { title: "", mask: &mask, score, pass, fails };
-        let (h, d) = zoom_headline(&info(15.1, false, 7), &info(59.9, false, 2), "TRIPO", "OURS", 610, 140);
-        assert_eq!(h, "OURS IS BETTER: 59.9 VS 15.1 OUT OF 100");
-        assert_eq!(d, "OURS VS TRIPO: FAILING FINDINGS 2 VS 7, BAD VERTS OVER ALL POSES 140 VS 610");
-        // The gate comes before the score.
-        let (h, _) = zoom_headline(&info(70.0, true, 0), &info(90.0, false, 1), "A", "B", 0, 4);
+        // score, tears (% of the surface torn), pass, failing findings.
+        let info = |score, tears, pass, fails| SheetInfo { title: "", mask: &mask, score, tears, pass, fails };
+        // Score and tears agree: the win is named by tears, which is
+        // what the person watching the character notices.
+        let (h, d) = zoom_headline(&info(15.1, 4.10, false, 7), &info(59.9, 0.40, false, 2), "TRIPO", "OURS", 610, 140);
+        assert_eq!(h, "OURS TEARS LESS: 0.40% VS 4.10% TORN");
+        assert_eq!(d, "TORN 0.40% VS 4.10%. SCORE 59.9 VS 15.1 (KEPT). FAILS 2 VS 7. BAD VERTS 140 VS 610");
+        // The gate comes before tears and the score.
+        let (h, _) = zoom_headline(&info(70.0, 9.0, true, 0), &info(90.0, 0.1, false, 1), "A", "B", 0, 4);
         assert_eq!(h, "A PASSES THE GATE, B DOES NOT");
-        let (h, _) = zoom_headline(&info(44.9, false, 2), &info(80.0, false, 3), "TRIPO", "OURS", 30, 41);
+        // Where the score points the other way from tears, the score's
+        // verdict is retired and tears names the win.
+        let (h, d) = zoom_headline(&info(90.0, 5.20, false, 1), &info(40.0, 0.50, false, 3), "PRO", "CAST", 30, 41);
+        assert_eq!(h, "CAST TEARS LESS, 0.50% VS 5.20% TORN; SCORE RETIRED");
+        assert!(d.contains("SCORE 40.0 VS 90.0 (RETIRED)"), "{d}");
+        // Tears the same within noise: the old fallbacks stand.
+        let (h, _) = zoom_headline(&info(44.9, 1.00, false, 2), &info(80.0, 1.02, false, 3), "TRIPO", "OURS", 30, 41);
         assert_eq!(h, "MIXED: OURS SCORES 80.0 VS 44.9 BUT FAILS MORE");
-        let (h, _) = zoom_headline(&info(61.0, false, 2), &info(61.4, false, 2), "A", "B", 9, 9);
+        let (h, _) = zoom_headline(&info(61.0, 1.0, false, 2), &info(61.4, 1.0, false, 2), "A", "B", 9, 9);
         assert!(h.starts_with("ABOUT EVEN"), "{h}");
     }
 }

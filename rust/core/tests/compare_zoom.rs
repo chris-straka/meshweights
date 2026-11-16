@@ -30,7 +30,7 @@ fn side<'a>(m: &'a Model, c: &'a Ctx, e: &'a Eval, r: &'a Report, k: &'a [u8]) -
         ctx: c,
         ev: e,
         w: &m.weights,
-        info: SheetInfo { title: &r.file, mask: k, score: r.score, pass: r.pass, fails: fails(r) },
+        info: SheetInfo { title: &r.file, mask: k, score: r.score, tears: 0.0, pass: r.pass, fails: fails(r) },
     }
 }
 
@@ -109,7 +109,7 @@ fn two_clean_rigs_make_a_sheet_that_says_so() {
         ctx: &c,
         ev: &e,
         w: &m.weights,
-        info: SheetInfo { title: &r.file, mask: &k, score: r.score, pass: r.pass, fails: 0 },
+        info: SheetInfo { title: &r.file, mask: &k, score: r.score, tears: 0.0, pass: r.pass, fails: 0 },
     };
     let o = ZoomOpts::default();
     let img = compare_zoom(&s(), &s(), &o);
