@@ -27,6 +27,11 @@ USAGE:
                   [--zoom [--rows N] [--label-a NAME] [--label-b NAME] [--clips DIR]]
                   [--poses-b rom_b.ron]
   weights probe   <in.glb> --out <dir> [--poses rom.ron] [--number-from N]
+  weights blind   <a.glb> <b.glb> --out <dir> [--motion hero.glb] [--motion-clips ...]
+                  [--seed N] [--top N] [--key key.json]
+                  (same-frame blind pairs per claim, at the game camera)
+  weights blind-score <dir> --answers answers.json [--key key.json]
+                  (lay a judge's answers against tears and the old score)
   weights closeness <pro.glb> <test.glb> [--motion hero.glb] [--json]
                   (how close test's weights come to a pro rig's, same mesh and skeleton)
   weights dump    <in.glb> --out weights.json   (per-vertex joints/weights, for DCC import)
@@ -83,6 +88,33 @@ COMPARE:
   --label-a/-b  what to call each rig on the sheet (default A and B)
   --poses-b     the second rig's own pose set, when its bones are named
                 differently (poses are matched by name)
+
+BLIND:
+  One pair per claim: for every failing headline finding of either rig
+  (a claim, named by kind and part), both rigs at the frame where the
+  claim is worst, from the game camera (the game's follow camera: 3 m
+  behind the character, a 45-degree lens, the whole body about 70% of
+  the frame; never a close-up of the fault), in the character's paint,
+  nothing marked and no rig named. The sides are only LEFT and RIGHT;
+  which rig is where is flipped by --seed (default 20261115), and the
+  pair order is shuffled by it too. Two more pairs keep the judge
+  honest: a can't-tell control (the same rig on both sides) and a
+  planted bad case (a copy with a mirrored limb's weights swapped),
+  which must be picked out and must be flagged by tears. The judged
+  folder holds pair_NN.png (both sides), pair_NN_left.png and
+  pair_NN_right.png, and pairs.json (the question and the focus of
+  each pair, no answers). The answer key goes beside the folder as
+  <dir>.key.json (--key says where), never in it.
+
+BLIND-SCORE:
+  Answers are JSON: one object mapping pair_01, pair_02... to left,
+  right or cant_tell (an 'answers' object holding that map works too).
+  Each claim is laid against the tears measure
+  (kept) and the old 0-100 score: where the judge and tears agree
+  against the score, that claim's score verdict is retired. Writes
+  <dir>/verdict.json and prints the same. Exit 0 only when the
+  control was answered can't-tell, the planted case was picked out,
+  and tears flag the planted rig.
 
 PROBE:
   Loops for a person to judge, so the pass line can be set to their eye:
@@ -155,6 +187,9 @@ const VALUED: &[&str] = &[
     "--motion-clips",
     "--kind",
     "--top",
+    "--seed",
+    "--answers",
+    "--key",
 ];
 
 impl Args {
@@ -294,7 +329,7 @@ fn cmd_sheet(a: &Args) -> ExitCode {
         }
     }
     let mask = wf::report::finding_mask(&ctx, &ev, &rep);
-    let info = wf::render::SheetInfo { title: &rep.file, mask: &mask, score: rep.score, pass: rep.pass, fails: fails(&rep) };
+    let info = wf::render::SheetInfo { title: &rep.file, mask: &mask, score: rep.score, tears: 0.0, pass: rep.pass, fails: fails(&rep) };
     let img = wf::render::sheet(&model, &ctx, &ev, &model.weights, &info, &so);
     if let Err(e) = write_png(out, &img) {
         return fail(e);
@@ -529,6 +564,353 @@ fn cmd_before_after(a: &Args) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn winner_of(x: &str, y: &str, vx: f64, vy: f64, eps: f64, lower_wins: bool) -> String {
+    if (vx - vy).abs() <= eps {
+        "tie".into()
+    } else if (vx < vy) == lower_wins {
+        x.into()
+    } else {
+        y.into()
+    }
+}
+
+/// Same-frame blind pairs per claim at the game camera (see BLIND).
+fn cmd_blind(a: &Args) -> ExitCode {
+    let (Some(pa), Some(pb)) = (a.pos.get(1), a.pos.get(2)) else { return fail("blind needs two .glb files") };
+    let Some(dir) = a.get("--out").map(Path::new) else { return fail("blind needs --out <dir>") };
+    let top = match a.get("--top").map(|v| v.parse::<usize>()) {
+        None => 6,
+        Some(Ok(n)) if n >= 1 => n,
+        Some(_) => return fail("--top needs a positive integer"),
+    };
+    let seed: u64 = match a.get("--seed").map(|v| v.parse()) {
+        None => 20261115,
+        Some(Ok(n)) => n,
+        Some(_) => return fail("--seed needs an integer"),
+    };
+    let kinds: Option<Vec<String>> = a.get("--kind").map(|k| k.split(',').map(|s| s.trim().to_string()).collect());
+    let set = match load_poses(a) {
+        Ok(s) => s,
+        Err(e) => return fail(e),
+    };
+    let opts = match ctx_opts(a, set.as_ref()) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    let spec = wf::MotionSpec {
+        source: a.get("--motion").map(PathBuf::from),
+        clips: a.get("--motion-clips").map(|c| c.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+    };
+    let (ca, cb) = match (wf::check_full(Path::new(pa), &opts, &spec), wf::check_full(Path::new(pb), &opts, &spec)) {
+        (Ok(x), Ok(y)) => (x, y),
+        (Err(e), _) | (_, Err(e)) => return fail(e),
+    };
+    let use_clips = match (&ca.motion, &cb.motion) {
+        (Some(x), Some(y)) => x.0.poses.len() == y.0.poses.len() && !x.0.poses.is_empty(),
+        _ => false,
+    };
+    let sec_name = if use_clips { "game clips" } else { "poses" };
+    let (Some(seca), Some(secb)) =
+        (ca.rep.headline.iter().find(|s| s.name == sec_name), cb.rep.headline.iter().find(|s| s.name == sec_name))
+    else {
+        return fail("blind: a rig has no headline section");
+    };
+    let torn_of = |sec: &wf::owner::Section, n: usize| -> Vec<bool> {
+        let mut t = vec![false; n];
+        for f in sec.findings.iter().filter(|f| f.severity == "fail" && f.kind != "limb_through") {
+            for &v in &f.vertices {
+                t[v as usize] = true;
+            }
+        }
+        t
+    };
+    let (ctxa, ctxb) = if use_clips { (&ca.motion.as_ref().unwrap().0, &cb.motion.as_ref().unwrap().0) } else { (&ca.ctx, &cb.ctx) };
+    let (torna, tornb) = (torn_of(seca, ca.model.nverts()), torn_of(secb, cb.model.nverts()));
+    let (areaa, areab) = (wf::owner::vertex_areas(&ca.model), wf::owner::vertex_areas(&cb.model));
+    let ka = wf::owner::BODY_M / wf::owner::height(&ca.model);
+    let kb = wf::owner::BODY_M / wf::owner::height(&cb.model);
+    // Claims: the failing findings of either rig, the largest first.
+    struct Claim {
+        kind: String,
+        part: String,
+        pose: usize,
+        frame: String,
+        src: usize,
+        verts: Vec<u32>,
+        area: f64,
+    }
+    let mut claims: Vec<Claim> = Vec::new();
+    for (src, sec, other_ctx) in [(0usize, seca, ctxb), (1usize, secb, ctxa)] {
+        for f in sec.findings.iter().filter(|f| f.severity == "fail" && f.kind != "limb_through") {
+            if kinds.as_ref().is_some_and(|k| !k.contains(&f.kind)) || f.worst_pose >= other_ctx.poses.len() {
+                continue;
+            }
+            let c = Claim {
+                kind: f.kind.clone(),
+                part: f.part.clone(),
+                pose: f.worst_pose,
+                frame: f.worst.clone(),
+                src,
+                verts: f.vertices.clone(),
+                area: f.area_cm2,
+            };
+            match claims.iter_mut().find(|x| x.kind == c.kind && x.part == c.part) {
+                Some(x) if c.area > x.area => *x = c,
+                Some(_) => {}
+                None => claims.push(c),
+            }
+        }
+    }
+    claims.sort_by(|x, y| y.area.total_cmp(&x.area));
+    claims.truncate(top);
+    // The planted bad case, made from rig A on the judged pose group.
+    let Some((planted_w, planted_pose, planted_verts, planted_what)) = wf::blind::planted_bad(&ca.model, ctxa, use_clips) else {
+        return fail("blind: rig A has no mirrored limb pair to plant a bad case from");
+    };
+    let planted_ev = wf::metrics::evaluate_with(&ca.model, ctxa, &planted_w, false);
+    let planted_score = wf::report::build("planted", &ca.model, ctxa, &planted_ev).score;
+    let planted_torn = wf::owner::torn(&ca.model, ctxa, &planted_w, use_clips);
+    let (paint_a, paint_b) = (wf::paint::read(&ca.model), wf::paint::read(&cb.model));
+    let torn_cm2 = |verts_src: usize, verts: &[u32], rig: usize| -> f64 {
+        let (model_s, model_d, torn, area, k) = if rig == 0 {
+            (if verts_src == 0 { &ca.model } else { &cb.model }, &ca.model, &torna, &areaa, ka)
+        } else {
+            (if verts_src == 0 { &ca.model } else { &cb.model }, &cb.model, &tornb, &areab, kb)
+        };
+        wf::blind::map_vertices(model_s, model_d, verts)
+            .iter()
+            .filter(|&&v| torn[v as usize])
+            .map(|&v| area[v as usize] * k * k * 1e4)
+            .sum::<f64>()
+            + 0.0
+    };
+    struct Pending {
+        category: &'static str,
+        focus: String,
+        frame: String,
+        pose: usize,
+        first: &'static str,
+        second: &'static str,
+        view_src: usize, // 0 rig A, 1 rig B, 2 planted copy of A
+        marked: Vec<u32>,
+        tears_cm2: std::collections::BTreeMap<String, f64>,
+        tears_winner: String,
+        score_winner: String,
+        expected: String,
+    }
+    let mut pend: Vec<Pending> = Vec::new();
+    for c in &claims {
+        let (ta, tb) = (torn_cm2(c.src, &c.verts, 0), torn_cm2(c.src, &c.verts, 1));
+        let tw = winner_of("A", "B", ta, tb, 0.5, true);
+        pend.push(Pending {
+            category: "claim",
+            focus: format!("{}: {}", c.kind.replace('_', " "), c.part),
+            frame: c.frame.clone(),
+            pose: c.pose,
+            first: "A",
+            second: "B",
+            view_src: c.src,
+            marked: c.verts.clone(),
+            tears_cm2: [("A".to_string(), (ta * 10.0).round() / 10.0), ("B".to_string(), (tb * 10.0).round() / 10.0)].into_iter().collect(),
+            tears_winner: tw.clone(),
+            score_winner: winner_of("A", "B", ca.rep.score, cb.rep.score, 1.0, false),
+            expected: tw,
+        });
+    }
+    // The control sits at the first claim's frame (or the planted one).
+    let (cpose, cframe) =
+        claims.first().map(|c| (c.pose, c.frame.clone())).unwrap_or((planted_pose, ctxa.poses[planted_pose].name.clone()));
+    pend.push(Pending {
+        category: "control",
+        focus: "the whole body at the game camera".into(),
+        frame: cframe,
+        pose: cpose,
+        first: "A",
+        second: "A",
+        view_src: 0,
+        marked: Vec::new(),
+        tears_cm2: [("A".to_string(), 0.0)].into_iter().collect(),
+        tears_winner: "tie".into(),
+        score_winner: "tie".into(),
+        expected: "cant_tell".into(),
+    });
+    let pta: f64 = planted_verts.iter().filter(|&&v| torna[v as usize]).map(|&v| areaa[v as usize] * ka * ka * 1e4).sum();
+    let ptp: f64 = planted_verts.iter().filter(|&&v| planted_torn[v as usize]).map(|&v| areaa[v as usize] * ka * ka * 1e4).sum();
+    pend.push(Pending {
+        category: "planted",
+        focus: "the whole body at the game camera".into(),
+        frame: ctxa.poses[planted_pose].name.clone(),
+        pose: planted_pose,
+        first: "A",
+        second: "PLANTED_A",
+        view_src: 2,
+        marked: planted_verts.clone(),
+        tears_cm2: [("A".to_string(), (pta * 10.0).round() / 10.0), ("PLANTED_A".to_string(), (ptp * 10.0).round() / 10.0)]
+            .into_iter()
+            .collect(),
+        tears_winner: winner_of("A", "PLANTED_A", pta, ptp, 0.5, true),
+        score_winner: winner_of("A", "PLANTED_A", ca.rep.score, planted_score, 1.0, false),
+        expected: "A".into(),
+    });
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return fail(format!("{}: {e}", dir.display()));
+    }
+    let side_of = |id: &str| -> wf::blind::BlindSide<'_> {
+        match id {
+            "B" => wf::blind::BlindSide { model: &cb.model, ctx: ctxb, weights: &cb.model.weights, paint: &paint_b },
+            "PLANTED_A" => wf::blind::BlindSide { model: &ca.model, ctx: ctxa, weights: &planted_w, paint: &paint_a },
+            _ => wf::blind::BlindSide { model: &ca.model, ctx: ctxa, weights: &ca.model.weights, paint: &paint_a },
+        }
+    };
+    let mut key_pairs: Vec<wf::blind::PairKey> = Vec::new();
+    let mut pub_pairs: Vec<serde_json::Value> = Vec::new();
+    for (i, &pi) in wf::blind::presentation_order(pend.len(), seed).iter().enumerate() {
+        let p = &pend[pi];
+        let pair = i + 1;
+        let (left_id, right_id) = if wf::blind::a_on_left(seed, pair) { (p.first, p.second) } else { (p.second, p.first) };
+        let (ls, rs) = (side_of(left_id), side_of(right_id));
+        let vs = side_of(match p.view_src {
+            1 => "B",
+            2 => "PLANTED_A",
+            _ => "A",
+        });
+        let src_model = if p.view_src == 1 { &cb.model } else { &ca.model };
+        let mut marked = vec![false; vs.model.nverts()];
+        for &v in wf::blind::map_vertices(src_model, vs.model, &p.marked).iter() {
+            marked[v as usize] = true;
+        }
+        let view = wf::blind::claim_view(&vs, p.pose, &marked);
+        let posed = |s: &wf::blind::BlindSide<'_>| wf::skin::lbs(s.model, &s.ctx.mats[p.pose.min(s.ctx.mats.len() - 1)], s.weights);
+        let (pl, pr) = (posed(&ls), posed(&rs));
+        let fit = wf::blind::game_fit(&view, &[&pl, &pr], wf::owner::height(ls.model), 520, 640);
+        let (limg, rimg) = (
+            wf::blind::cell_image(&ls, p.pose, &view, fit, 520, 640, "LEFT"),
+            wf::blind::cell_image(&rs, p.pose, &view, fit, 520, 640, "RIGHT"),
+        );
+        let sheet = wf::blind::pair_sheet(&limg, &rimg, pair);
+        let (fp, fl, fr) = (
+            dir.join(format!("pair_{pair:02}.png")),
+            dir.join(format!("pair_{pair:02}_left.png")),
+            dir.join(format!("pair_{pair:02}_right.png")),
+        );
+        for (path, img) in [(&fp, &sheet), (&fl, &limg), (&fr, &rimg)] {
+            if let Err(e) = write_png(&path.to_string_lossy(), img) {
+                return fail(e);
+            }
+        }
+        println!("{}", fp.display());
+        pub_pairs.push(serde_json::json!({
+            "pair": pair, "file": fp.file_name().unwrap().to_string_lossy(), "left": fl.file_name().unwrap().to_string_lossy(),
+            "right": fr.file_name().unwrap().to_string_lossy(), "focus": p.focus, "frame": p.frame,
+            "question": "Which side's skin bends and follows cleaner in this frame? Answer left, right, or cant_tell."
+        }));
+        key_pairs.push(wf::blind::PairKey {
+            pair,
+            category: p.category.into(),
+            focus: p.focus.clone(),
+            frame: p.frame.clone(),
+            left_rig: left_id.into(),
+            right_rig: right_id.into(),
+            expected: p.expected.clone(),
+            tears_cm2: p.tears_cm2.clone(),
+            tears_winner: p.tears_winner.clone(),
+            score_winner: p.score_winner.clone(),
+        });
+    }
+    let doc = serde_json::json!({
+        "judge": "For each pair, look at the two sides (same frame, same camera, nothing marked) and answer which side's skin bends and follows cleaner: left, right, or cant_tell. Do not open the key file.",
+        "pairs": pub_pairs
+    });
+    if let Err(e) = std::fs::write(dir.join("pairs.json"), serde_json::to_string_pretty(&doc).unwrap()) {
+        return fail(format!("{}: {e}", dir.display()));
+    }
+    let key = wf::blind::BlindKey {
+        rig_a: ca.rep.file.clone(),
+        rig_b: cb.rep.file.clone(),
+        section: sec_name.into(),
+        seed,
+        planted: planted_what.clone(),
+        tears_pct: [("A".to_string(), seca.tears_pct), ("B".to_string(), secb.tears_pct)].into_iter().collect(),
+        scores: [
+            ("A".to_string(), ca.rep.score),
+            ("B".to_string(), cb.rep.score),
+            ("PLANTED_A".to_string(), (planted_score * 10.0).round() / 10.0),
+        ]
+        .into_iter()
+        .collect(),
+        pairs: key_pairs,
+    };
+    let key_path = match a.get("--key") {
+        Some(k) => PathBuf::from(k),
+        None => {
+            let name = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "blind".into());
+            dir.parent().unwrap_or(Path::new(".")).join(format!("{name}.key.json"))
+        }
+    };
+    if let Err(e) = std::fs::write(&key_path, serde_json::to_string_pretty(&key).unwrap()) {
+        return fail(format!("{}: {e}", key_path.display()));
+    }
+    println!(
+        "blind: {} pairs ({} claims, a can't-tell control, a planted bad case) on the {sec_name}; A torn {:.2}%, B torn {:.2}%; key {}",
+        pend.len(),
+        claims.len(),
+        seca.tears_pct,
+        secb.tears_pct,
+        key_path.display()
+    );
+    ExitCode::SUCCESS
+}
+
+/// Lays a judge's answers against tears and the old score (BLIND-SCORE).
+fn cmd_blind_score(a: &Args) -> ExitCode {
+    let Some(dir) = a.pos.get(1).map(Path::new) else { return fail("blind-score needs a blind <dir>") };
+    let Some(answers_path) = a.get("--answers") else { return fail("blind-score needs --answers answers.json") };
+    let key_path = match a.get("--key") {
+        Some(k) => PathBuf::from(k),
+        None => {
+            let name = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "blind".into());
+            let sibling = dir.parent().unwrap_or(Path::new(".")).join(format!("{name}.key.json"));
+            if sibling.exists() { sibling } else { dir.join("answer_key.json") }
+        }
+    };
+    let key: wf::blind::BlindKey =
+        match std::fs::read(&key_path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string())) {
+            Ok(k) => k,
+            Err(e) => return fail(format!("{}: {e}", key_path.display())),
+        };
+    let raw: serde_json::Value =
+        match std::fs::read(answers_path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string())) {
+            Ok(v) => v,
+            Err(e) => return fail(format!("{answers_path}: {e}")),
+        };
+    let obj = raw.get("answers").unwrap_or(&raw);
+    let Some(obj) = obj.as_object() else { return fail("answers must be a JSON object of pair -> left/right/cant_tell") };
+    let mut answers: std::collections::BTreeMap<usize, String> = std::collections::BTreeMap::new();
+    for (k, v) in obj {
+        let digits: String = k.chars().filter(|c| c.is_ascii_digit()).collect();
+        if let (Ok(n), Some(s)) = (digits.parse::<usize>(), v.as_str()) {
+            answers.insert(n, s.to_string());
+        }
+    }
+    let v = wf::blind::score_pairs(&key, &answers);
+    for p in &v.pairs {
+        println!("pair {:02} [{}] {}: {}", p.pair, p.category, p.focus, p.note);
+    }
+    println!(
+        "judge agrees with tears on {}/{} claims; the old score agrees with the judge on {}/{}; retired on pairs {:?}",
+        v.judge_agrees_tears, v.claims_judged, v.score_agrees_judge, v.claims_judged, v.score_retired_pairs
+    );
+    println!(
+        "control {}; planted {}",
+        if v.control_ok { "ok" } else { "FAILED" },
+        if v.planted_ok && v.planted_tears_ok { "ok" } else { "FAILED" }
+    );
+    let out = dir.join("verdict.json");
+    let _ = std::fs::write(&out, serde_json::to_string_pretty(&v).unwrap());
+    println!("{}", out.display());
+    if v.pass { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
 /// Loops of one rig for a person to judge (see PROBE in the usage).
 fn cmd_probe(a: &Args) -> ExitCode {
     let Some(input) = a.pos.get(1) else { return fail("probe needs an input .glb") };
@@ -556,7 +938,7 @@ fn cmd_probe(a: &Args) -> ExitCode {
         ctx: &ctx,
         ev: &ev,
         w: &model.weights,
-        info: wf::render::SheetInfo { title: &rep.file, mask: &mask, score: rep.score, pass: rep.pass, fails: fails(&rep) },
+        info: wf::render::SheetInfo { title: &rep.file, mask: &mask, score: rep.score, tears: 0.0, pass: rep.pass, fails: fails(&rep) },
     };
     let o = wf::render::ZoomOpts { cell_w: 720, cell_h: 560, ..Default::default() };
     if let Err(e) = std::fs::create_dir_all(dir) {
@@ -676,22 +1058,46 @@ fn cmd_compare(a: &Args) -> ExitCode {
     };
     let mask_a = wf::report::finding_mask(&ca, &ea, &rpa);
     let mask_b = wf::report::finding_mask(&cb, &eb, &rpb);
+    // The zoomed sheet's verdict is by tears (what a person notices),
+    // on the same poses the sheet shows; the score only backs it up.
+    let tears_a = wf::owner::assess(&ma, &ca, &ea, &rpa, &ma.weights, false, "poses", Vec::new(), String::new()).tears_pct;
+    let tears_b = wf::owner::assess(&mb, &cb, &eb, &rpb, &mb.weights, false, "poses", Vec::new(), String::new()).tears_pct;
     let sa = wf::render::Side {
         model: &ma,
         ctx: &ca,
         ev: &ea,
         w: &ma.weights,
-        info: wf::render::SheetInfo { title: &rpa.file, mask: &mask_a, score: rpa.score, pass: rpa.pass, fails: fails(&rpa) },
+        info: wf::render::SheetInfo {
+            title: &rpa.file,
+            mask: &mask_a,
+            score: rpa.score,
+            tears: tears_a,
+            pass: rpa.pass,
+            fails: fails(&rpa),
+        },
     };
     let sb = wf::render::Side {
         model: &mb,
         ctx: &cb,
         ev: &eb,
         w: &mb.weights,
-        info: wf::render::SheetInfo { title: &rpb.file, mask: &mask_b, score: rpb.score, pass: rpb.pass, fails: fails(&rpb) },
+        info: wf::render::SheetInfo {
+            title: &rpb.file,
+            mask: &mask_b,
+            score: rpb.score,
+            tears: tears_b,
+            pass: rpb.pass,
+            fails: fails(&rpb),
+        },
     };
-    let worst =
-        |r: &wf::report::Report| r.regions.first().map(|x| format!("WORST PART: {} ({:.0}/100)", x.label, x.score)).unwrap_or_default();
+    let worst = |r: &wf::report::Report| {
+        r.regions
+            .iter()
+            .max_by_key(|x| x.bad)
+            .filter(|x| x.bad > 0)
+            .map(|x| format!("WORST PART: {} ({} BAD VERTS)", x.label, x.bad))
+            .unwrap_or_default()
+    };
     let (note_a, note_b) = (worst(&rpa), worst(&rpb));
     let zoom = wf::render::ZoomOpts {
         rows,
@@ -874,14 +1280,14 @@ fn cmd_fix(a: &Args) -> ExitCode {
             ctx: &ctx,
             ev: &ev0,
             w: &model.weights,
-            info: wf::render::SheetInfo { title: &ta, mask: &ma, score: rb.score, pass: rb.pass, fails: fails(rb) },
+            info: wf::render::SheetInfo { title: &ta, mask: &ma, score: rb.score, tears: 0.0, pass: rb.pass, fails: fails(rb) },
         };
         let sb = wf::render::Side {
             model: &model,
             ctx: &ctx,
             ev: &res.eval,
             w: &res.weights,
-            info: wf::render::SheetInfo { title: &tb, mask: &mb, score: ra.score, pass: ra.pass, fails: fails(ra) },
+            info: wf::render::SheetInfo { title: &tb, mask: &mb, score: ra.score, tears: 0.0, pass: ra.pass, fails: fails(ra) },
         };
         if let Err(e) = write_png(sheet_path, &wf::render::compare(&sa, &sb, &wf::render::SheetOpts::default())) {
             return fail(e);
@@ -974,6 +1380,8 @@ fn flags_of(cmd: &str) -> Option<Vec<&'static str>> {
         "check" => &["--json", "--vertex-json", "--motion", "--motion-clips"],
         "sheet" => &["--out", "--cols"],
         "probe" => &["--out", "--number-from"],
+        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key"],
+        "blind-score" => &["--answers", "--key"],
         "show" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
         "before-after" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
         "closeness" => &["--json", "--motion", "--motion-clips"],
@@ -1022,6 +1430,8 @@ fn main() -> ExitCode {
         "fix" => cmd_fix(&a),
         "sheet" => cmd_sheet(&a),
         "compare" => cmd_compare(&a),
+        "blind" => cmd_blind(&a),
+        "blind-score" => cmd_blind_score(&a),
         "probe" => cmd_probe(&a),
         "show" => cmd_show(&a),
         "before-after" => cmd_before_after(&a),

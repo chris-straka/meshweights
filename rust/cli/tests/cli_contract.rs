@@ -131,6 +131,81 @@ fn skintokens_candidate_is_scored() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Blind pairs: one per claim plus a can't-tell control and a planted
+/// bad case, the key outside the judged folder, and `blind-score`
+/// retiring the old score only where the judge and tears agree
+/// against it. The test reads the key (it is not the judge) and
+/// answers as a perfect judge would.
+#[test]
+fn blind_pairs_and_scoring() {
+    let d = tmp("blind");
+    let ds = d.to_str().unwrap();
+    assert_eq!(run(&["fixture", "all", "--out", ds]).0, 0);
+    // Bleed (score 9.7) against the cape on the wrong bone (18.1): the
+    // score ranks the cape rig better, tears rank the bleed rig
+    // better on the cape's claims — the disagreement the score loses.
+    let a = d.join("mannequin_bleed.glb");
+    let b = d.join("mannequin_cape_wrong_bone.glb");
+    let out = d.join("pairs");
+    let (c, stdout, _) = run(&["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out.to_str().unwrap(), "--top", "4"]);
+    assert_eq!(c, 0, "{stdout}");
+    let pubdoc: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("pairs.json")).unwrap()).unwrap();
+    let pairs = pubdoc["pairs"].as_array().unwrap();
+    assert!(pairs.len() >= 4, "{pairs:?}");
+    for p in pairs {
+        assert_eq!(&std::fs::read(out.join(p["file"].as_str().unwrap())).unwrap()[1..4], b"PNG");
+        // The judged folder names no rig and holds no key.
+        assert!(p["left"].as_str().unwrap().starts_with("pair_"));
+    }
+    assert!(!out.join("answer_key.json").exists() && !out.to_string_lossy().contains("key"));
+    let key: serde_json::Value = serde_json::from_slice(&std::fs::read(d.join("pairs.key.json")).unwrap()).unwrap();
+    let kpairs = key["pairs"].as_array().unwrap();
+    assert_eq!(kpairs.len(), pairs.len());
+    assert_eq!(kpairs.iter().filter(|p| p["category"] == "control").count(), 1);
+    assert_eq!(kpairs.iter().filter(|p| p["category"] == "planted").count(), 1);
+    assert!(kpairs.iter().filter(|p| p["category"] == "claim").all(|p| p["tears_winner"] == "A" || p["tears_winner"] == "B"));
+    // A perfect judge: tears' winner on claims, can't-tell on the
+    // control, the unplanted rig on the planted case.
+    let mut answers = serde_json::Map::new();
+    for p in kpairs {
+        let n = p["pair"].as_u64().unwrap();
+        let ans = match p["category"].as_str().unwrap() {
+            "control" => "cant_tell",
+            _ => {
+                let want = p["expected"].as_str().unwrap();
+                if p["left_rig"].as_str().unwrap() == want { "left" } else { "right" }
+            }
+        };
+        answers.insert(format!("pair_{n:02}"), ans.into());
+    }
+    let af = d.join("answers.json");
+    std::fs::write(&af, serde_json::to_string(&answers).unwrap()).unwrap();
+    let (c, stdout, _) = run(&["blind-score", out.to_str().unwrap(), "--answers", af.to_str().unwrap()]);
+    assert_eq!(c, 0, "{stdout}");
+    let verdict: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("verdict.json")).unwrap()).unwrap();
+    assert_eq!(verdict["pass"], true, "{verdict}");
+    assert_eq!(verdict["control_ok"], true);
+    assert_eq!(verdict["planted_ok"], true);
+    assert_eq!(verdict["planted_tears_ok"], true);
+    // On the cape's claims the judge and tears agree against the
+    // score (18.1 beats 9.7 there): those pairs retire it.
+    let retired = verdict["score_retired_pairs"].as_array().unwrap();
+    assert!(!retired.is_empty(), "{verdict}");
+    // Picking the planted side must fail the run.
+    for p in kpairs.iter().filter(|p| p["category"] == "planted") {
+        let n = p["pair"].as_u64().unwrap();
+        let bad_side = if p["left_rig"].as_str().unwrap() == p["expected"].as_str().unwrap() { "right" } else { "left" };
+        answers.insert(format!("pair_{n:02}"), bad_side.into());
+    }
+    std::fs::write(&af, serde_json::to_string(&answers).unwrap()).unwrap();
+    let (c, stdout, _) = run(&["blind-score", out.to_str().unwrap(), "--answers", af.to_str().unwrap()]);
+    assert_eq!(c, 1, "{stdout}");
+    // Unknown flags are usage errors here too.
+    assert_eq!(run(&["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out.to_str().unwrap(), "--seed", "x"]).0, 2);
+    assert_eq!(run(&["blind-score", out.to_str().unwrap()]).0, 2);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A mistyped or misplaced flag is a usage error, not silently ignored
 /// (`--jsn` used to print the text report and exit 0).
 #[test]
