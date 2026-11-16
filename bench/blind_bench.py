@@ -47,13 +47,14 @@ def main():
         ap.error("making pairs needs --out and NAME=a.glb,b.glb runs")
     os.makedirs(a.out, exist_ok=True)
     rc = 0
-    for spec in a.runs:
+    for idx, spec in enumerate(a.runs):
         name, sep, rest = spec.partition("=")
         left, comma, right = rest.partition(",")
         if not sep or not comma:
             ap.error(f"bad run {spec!r}: want NAME=a.glb,b.glb")
         out = os.path.join(a.out, name)
-        cmd = [w, "blind", left, right, "--out", out, "--seed", a.seed, "--top", a.top]
+        seed = str(int(a.seed) + idx) if a.seed.lstrip("-").isdigit() else a.seed
+        cmd = [w, "blind", left, right, "--out", out, "--seed", seed, "--top", a.top]
         if a.motion:
             cmd += ["--motion", a.motion]
         print(f"== {name}: {' '.join(cmd)}", flush=True)
