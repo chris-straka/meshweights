@@ -26,6 +26,9 @@ Pure Rust, permissive deps only (serde, serde_json, ron, png, rayon).
                     [--poses rom.ron] [--json] [--vertex-json f.json]
     weights show    hero.glb --out dir/ [--motion game_hero.glb] [--kind wrong_bone] [--top N]
                                                     # a close-up sheet per headline finding
+    weights before-after raw.glb fixed.glb --out dir/ --motion game_hero.glb [--top N]
+                                                    # the raw rig's worst areas on the clips, each
+                                                    # beside the same place and frame on the other rig
     weights sheet   hero.glb --out sheet.png        # ROM pose sheet, bad verts red
     weights fix     hero.glb --out fixed.glb --sheet ab.png
                     [--method auto|smooth,geodesic,transfer,optimize]

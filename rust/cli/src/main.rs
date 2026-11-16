@@ -19,6 +19,9 @@ USAGE:
                   [--motion-clips ...] [--no-headline-guard]
   weights show    <in.glb> --out <dir> [--motion hero.glb] [--motion-clips ...] [--kind K,...]
                   [--top N]   (a close-up sheet per headline finding)
+  weights before-after <before.glb> <after.glb> --out <dir> --motion hero.glb [--top N]
+                  [--kind K,...]   (the before rig's worst areas on the game's clips,
+                  each beside the same place on the after rig at the same frame)
   weights sheet   <in.glb> --out sheet.png [--poses rom.ron] [--cols N]
   weights compare <a.glb> <b.glb> --out ab.png [--poses rom.ron]
                   [--zoom [--rows N] [--label-a NAME] [--label-b NAME] [--clips DIR]]
@@ -433,6 +436,96 @@ fn cmd_show(a: &Args) -> ExitCode {
         index.push(serde_json::json!({"file": path.file_name().unwrap().to_string_lossy(), "section": sec, "finding": f}));
     }
     let _ = std::fs::write(dir.join("findings.json"), serde_json::to_string_pretty(&index).unwrap());
+    ExitCode::SUCCESS
+}
+
+/// The before rig's worst failing areas on the game's clips, each beside
+/// the same place on the after rig at the same frame (BEFORE-AFTER).
+fn cmd_before_after(a: &Args) -> ExitCode {
+    let (Some(bp), Some(ap)) = (a.pos.get(1), a.pos.get(2)) else { return fail("before-after needs <before.glb> <after.glb>") };
+    let Some(dir) = a.get("--out").map(Path::new) else { return fail("before-after needs --out <dir>") };
+    let top = match a.get("--top").map(|v| v.parse::<usize>()) {
+        None => 3,
+        Some(Ok(n)) if n >= 1 => n,
+        Some(_) => return fail("--top needs a positive integer"),
+    };
+    let kinds: Option<Vec<String>> = a.get("--kind").map(|k| k.split(',').map(|s| s.trim().to_string()).collect());
+    let set = match load_poses(a) {
+        Ok(s) => s,
+        Err(e) => return fail(e),
+    };
+    let opts = match ctx_opts(a, set.as_ref()) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    let spec = wf::MotionSpec {
+        source: a.get("--motion").map(PathBuf::from),
+        clips: a.get("--motion-clips").map(|c| c.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+    };
+    let (b, af) = match (wf::check_full(Path::new(bp), &opts, &spec), wf::check_full(Path::new(ap), &opts, &spec)) {
+        (Ok(b), Ok(a)) => (b, a),
+        (Err(e), _) | (_, Err(e)) => return fail(e),
+    };
+    let (Some(bm), Some(am)) = (b.motion.as_ref(), af.motion.as_ref()) else {
+        return fail("before-after judges the game's clips: give --motion hero.glb (or rigs with their own clips)");
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return fail(format!("{}: {e}", dir.display()));
+    }
+    // The after rig's vertex at each before vertex's place (the same index
+    // when the fix only changed weights).
+    let same = b.model.nverts() == af.model.nverts() && b.model.rest.iter().zip(&af.model.rest).all(|(x, y)| (*x - *y).len() < 1e-6);
+    let map = |v: u32| -> u32 {
+        if same {
+            return v;
+        }
+        let p = b.model.rest[v as usize];
+        (0..af.model.nverts()).min_by(|&i, &j| (af.model.rest[i] - p).len().total_cmp(&(af.model.rest[j] - p).len())).unwrap_or(0) as u32
+    };
+    let torn_after = wf::owner::torn(&af.model, &am.0, &af.model.weights, true);
+    let area_a = wf::owner::vertex_areas(&af.model);
+    let k = wf::owner::BODY_M / wf::owner::height(&af.model);
+    let (pb, pa) = (wf::paint::read(&b.model), wf::paint::read(&af.model));
+    let picked: Vec<&wf::owner::Finding> = b
+        .rep
+        .headline
+        .iter()
+        .filter(|s| s.name == "game clips")
+        .flat_map(|s| s.findings.iter())
+        .filter(|f| f.severity == "fail" && kinds.as_ref().map_or(f.kind != "limb_through", |k| k.contains(&f.kind)))
+        .collect();
+    let mut picked = picked;
+    picked.sort_by(|x, y| y.area_cm2.total_cmp(&x.area_cm2));
+    picked.truncate(top);
+    if picked.is_empty() {
+        println!("{bp}: nothing failing on the game's clips");
+    }
+    let mut index = Vec::new();
+    for (i, f) in picked.iter().enumerate() {
+        let mut after_vs: Vec<u32> = f.vertices.iter().map(|&v| map(v)).collect();
+        after_vs.sort_unstable();
+        after_vs.dedup();
+        let left: f64 = after_vs.iter().filter(|&&v| torn_after[v as usize]).map(|&v| area_a[v as usize] * k * k * 1e4).sum::<f64>() + 0.0;
+        let mut marked_b = vec![false; b.model.nverts()];
+        for &v in &f.vertices {
+            marked_b[v as usize] = true;
+        }
+        let bs =
+            wf::render::BaSide { model: &b.model, ctx: &bm.0, marked: &marked_b, paint: &pb, label: format!("before, in {}", f.worst) };
+        let as_ = wf::render::BaSide { model: &af.model, ctx: &am.0, marked: &torn_after, paint: &pa, label: "after, same frame".into() };
+        let head0 = format!("{}: {}", f.kind.replace('_', " "), f.part);
+        let head1 = format!("before: {} - {:.0} cm2", f.detail.replace('\u{b2}', "2"), f.area_cm2);
+        let head2 = format!("after: {left:.0} cm2 of that skin still tears (red: all skin the after rig tears)");
+        let title = format!("{} -> {} - game clips - weights before-after", b.rep.file, af.rep.file);
+        let img = wf::render::before_after_sheet(&bs, &as_, &f.vertices, &after_vs, f.worst_pose, [&head0, &head1, &head2], &title);
+        let path = dir.join(format!("{:02}_{}.png", i + 1, f.kind));
+        if let Err(e) = write_png(&path.to_string_lossy(), &img) {
+            return fail(e);
+        }
+        println!("{}  before {:.0} cm2, after {left:.0} cm2", path.display(), f.area_cm2);
+        index.push(serde_json::json!({"file": path.file_name().unwrap().to_string_lossy(), "finding": f, "after_cm2": left}));
+    }
+    let _ = std::fs::write(dir.join("before_after.json"), serde_json::to_string_pretty(&index).unwrap());
     ExitCode::SUCCESS
 }
 
@@ -882,6 +975,7 @@ fn flags_of(cmd: &str) -> Option<Vec<&'static str>> {
         "sheet" => &["--out", "--cols"],
         "probe" => &["--out", "--number-from"],
         "show" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
+        "before-after" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
         "closeness" => &["--json", "--motion", "--motion-clips"],
         "compare" => &["--out", "--poses-b", "--rows", "--label-a", "--label-b", "--zoom", "--clips"],
         "fix" => &[
@@ -930,6 +1024,7 @@ fn main() -> ExitCode {
         "compare" => cmd_compare(&a),
         "probe" => cmd_probe(&a),
         "show" => cmd_show(&a),
+        "before-after" => cmd_before_after(&a),
         "closeness" => cmd_closeness(&a),
         "dump" => cmd_dump(&a),
         "fixture" => cmd_fixture(&a),

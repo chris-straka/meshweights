@@ -1361,3 +1361,75 @@ pub fn best_view(pos: &[Vec3], tris: &[[u32; 3]], marked: &[bool]) -> View {
     }
     best.1
 }
+
+/// One side of a before/after sheet: a rig, its clips, the skin to mark
+/// red, and the frame to show.
+pub struct BaSide<'a> {
+    pub model: &'a Model,
+    pub ctx: &'a Ctx,
+    pub marked: &'a [bool],
+    pub paint: &'a crate::paint::Paint,
+    pub label: String,
+}
+
+/// The same area of two rigs of one body (a fix's input and output, or two
+/// rigs of the same mesh): the before rig whole at the frame where the
+/// area is worst, then a close-up of the area on each rig at that frame
+/// from the same camera and crop. `area` is the before rig's vertices;
+/// `area_after` the after rig's vertices in the same place.
+pub fn before_after_sheet(b: &BaSide, a: &BaSide, area: &[u32], area_after: &[u32], frame: usize, head: [&str; 3], title: &str) -> Image {
+    let (pw, ph, side) = (460usize, 640usize, 300usize);
+    let top = 96usize;
+    let (iw, ih) = (side + 2 * pw + 40, top + ph + 44);
+    let mut img = Image::new(iw, ih, BG);
+    let pose = |s: &BaSide| lbs(s.model, &s.ctx.mats[frame.min(s.ctx.mats.len().saturating_sub(1))], &s.model.weights);
+    let colors = |s: &BaSide| -> Vec<[f64; 3]> {
+        (0..s.model.nverts())
+            .map(|v| {
+                if s.marked[v] {
+                    return BAD;
+                }
+                let c = s.paint.rgb[v];
+                let l = 0.3 * c[0] as f64 + 0.59 * c[1] as f64 + 0.11 * c[2] as f64;
+                [
+                    0.15 + 0.6 * (0.7 * c[0] as f64 + 0.3 * l),
+                    0.15 + 0.6 * (0.7 * c[1] as f64 + 0.3 * l),
+                    0.15 + 0.6 * (0.7 * c[2] as f64 + 0.3 * l),
+                ]
+            })
+            .collect()
+    };
+    let (pb, pa) = (pose(b), pose(a));
+    let (cb, ca) = (colors(b), colors(a));
+    let mut in_area = vec![false; b.model.nverts()];
+    for &v in area {
+        in_area[v as usize] = true;
+    }
+    let view = best_view(&pb, &b.model.tris, &in_area);
+    let full = fit(&view, &[&pb], side, ph);
+    draw_mesh(&mut img, 0, top, side, ph, &pb, &b.model.tris, &cb, &view, full);
+    let crop = |pos: &[Vec3], vs: &[u32]| -> (f64, f64, f64) {
+        let (mut lo, mut hi) = (v3(f64::MAX, f64::MAX, 0.0), v3(f64::MIN, f64::MIN, 0.0));
+        for &v in vs {
+            let q = view.to_cam(pos[v as usize]);
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
+        (0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y), (hi.x - lo.x).max(hi.y - lo.y))
+    };
+    let (bx, by, bspan) = crop(&pb, area);
+    let span = (bspan * 2.0).max(0.18 * crate::owner::height(b.model));
+    let ppu = (pw as f64 / span).min(ph as f64 / span);
+    draw_mesh(&mut img, side + 20, top, pw, ph, &pb, &b.model.tris, &cb, &view, Fit { cx: bx, cy: by, ppu });
+    // The after rig framed on the same place (its own vertices there), at
+    // the same scale.
+    let (ax, ay, _) = if area_after.is_empty() { (bx, by, 0.0) } else { crop(&pa, area_after) };
+    draw_mesh(&mut img, side + pw + 40, top, pw, ph, &pa, &a.model.tris, &ca, &view, Fit { cx: ax, cy: ay, ppu });
+    img.text(12, 12, &fit_text(head[0], (iw - 24) / 18), 3, RED);
+    img.text(12, 44, &fit_text(head[1], (iw - 24) / 12), 2, FG);
+    img.text(12, 70, &fit_text(head[2], (iw - 24) / 12), 2, DIM);
+    img.text(side + 28, top + 8, &fit_text(&b.label, pw / 12), 2, FG);
+    img.text(side + pw + 48, top + 8, &fit_text(&a.label, pw / 12), 2, FG);
+    img.text(12, top + ph + 12, &fit_text(title, (iw - 24) / 12), 2, DIM);
+    img
+}
