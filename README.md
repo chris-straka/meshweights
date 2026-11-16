@@ -36,9 +36,18 @@ Pure Rust, permissive deps only (serde, serde_json, ron, png, rayon).
                     [--all-regions]
     weights compare a.glb b.glb --out ab.png        # same poses side by side
     weights compare a.glb b.glb --out ab.png --zoom --label-a THEIRS --label-b OURS --clips clips/
-                                                    # which rig is better: worst poses first, close-ups in
-                                                    # clay with the failing skin red, a loop for each pose
+                                                    # which rig is better, by pass then tears (the
+                                                    # score only where it agrees; where it points the
+                                                    # other way the headline retires it): worst poses
+                                                    # first, close-ups in clay, a loop for each pose
     weights probe   hero.glb --out cases/           # unmarked loops for a person to judge
+    weights blind   a.glb b.glb --out pairs/ [--motion hero.glb] [--seed N] [--top N]
+                                                    # same-frame blind pairs per claim at the
+                                                    # game camera, plus a can't-tell control and
+                                                    # a planted bad case; key beside the folder
+    weights blind-score pairs/ --answers a.json     # judge vs tears vs the old score;
+                                                    # where judge and tears agree against the
+                                                    # score, its verdict on that claim is retired
     weights dump    fixed.glb --out weights.json    # per-vertex weights for DCCs
     weights fixture all --out fixtures/             # test mannequins
 
@@ -62,6 +71,19 @@ motionforge `animate` carries the game's), or `--motion hero.glb`'s put on
 the rig by bone role (measuring only; nothing is written). The 0-100 score
 follows as the older measure; JSON keeps `score`, `pass` and the findings
 below, and adds `headline` and `anatomy`.
+
+**blind** proves a claim by eye: for every failing headline finding
+of either rig, both rigs at the same worst frame from the game camera
+(the game's follow camera, the whole body in frame, never a close-up
+of the fault), in the character's paint, nothing marked and no rig
+named — the judge answers left, right or can't tell, with a
+can't-tell control (same rig both sides) and a planted bad case (a
+mirrored limb's weights swapped) that must be picked out and flagged
+by tears. **blind-score** lays the answers against tears (kept) and
+the old score: where judge and tears agree against the score, that
+claim's score verdict is retired. The `compare --zoom` headline
+follows the same rule. Protocol and fixture numbers:
+[`docs/blind.md`](docs/blind.md); `bench/blind_bench.py` drives runs.
 
 Bone roles come from the skeleton's structure, not names (`core/src/anatomy.rs`):
 feet are chains ending at the floor, legs climb from them, arms reach

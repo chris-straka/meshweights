@@ -52,6 +52,12 @@ Per pose group (the game's clips, then the range-of-motion poses):
 The score, `pass` and the old findings list are unchanged in the JSON
 (genforge reads them; `fix` gates on them).
 
+Since 2026-11-15 a claim can be judged blind at the game camera
+(`weights blind`, `weights blind-score`; `docs/blind.md`): where a
+judge and tears agree against the score, that claim's score verdict
+is retired, and the `compare --zoom` headline ranks by pass then
+tears on the same rule. Tears is the kept measure throughout.
+
 ## The clips
 
 `--motion hero.glb` plays the source's clips (default walk, run,
