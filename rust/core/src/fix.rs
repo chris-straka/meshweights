@@ -704,6 +704,14 @@ pub fn mirror(model: &Model, from_left: bool) -> Option<Weights> {
             if let Some(other) = a.roles.get(&format!("{base}.R")) {
                 for (i, &j) in js.iter().enumerate() {
                     if let Some(&o) = other.get(i) {
+                        // A rig posed asymmetrically at rest (a striding
+                        // figure) cannot copy weights across its midline.
+                        if ["thigh", "shin", "upper_arm", "forearm"].contains(&base)
+                            && ((sk.head[o] - refl(sk.head[j])).len() > 0.06 * model.scale
+                                || (sk.tail[o] - refl(sk.tail[j])).len() > 0.08 * model.scale)
+                        {
+                            return None;
+                        }
                         partner[j] = o as u32;
                         partner[o] = j as u32;
                     }
@@ -755,6 +763,8 @@ pub fn mirror(model: &Model, from_left: bool) -> Option<Weights> {
         }
         (best.1 != usize::MAX && best.0 < 0.02 * model.scale).then_some(best.1)
     };
+    let mut asked = 0usize;
+    let mut matched = 0usize;
     let w: Weights = (0..model.nverts())
         .map(|v| {
             let lat = (model.rest[v] - c).dot(left);
@@ -762,13 +772,17 @@ pub fn mirror(model: &Model, from_left: bool) -> Option<Weights> {
             if !receives || model.rigid[v] {
                 return model.weights[v].clone();
             }
+            asked += 1;
             match nearest(refl(model.rest[v])) {
-                Some(u) => normalize_vw(model.weights[u].iter().map(|&(j, x)| (partner[j as usize], x)).collect()),
+                Some(u) => {
+                    matched += 1;
+                    normalize_vw(model.weights[u].iter().map(|&(j, x)| (partner[j as usize], x)).collect())
+                }
                 None => model.weights[v].clone(),
             }
         })
         .collect();
-    Some(w)
+    (asked > 0 && matched * 20 >= asked * 17).then_some(w)
 }
 
 /// Maps source joints onto target joints: by name; else by structural
@@ -1063,10 +1077,10 @@ fn fail_limits(model: &Model, ctx: &Ctx, had_fail: &[bool]) -> (Counts, Counts) 
 }
 
 /// Edit cost: score energy per unit of mean weight change (`pick::Problem::
-/// edit_cost`). 0.01 weighs a plan that changes every vertex's weights by
-/// 0.1 (L1) like 0.001 of energy, about 0.1 score points near 90: among
-/// plans that score about the same, the smaller edit wins.
-const EDIT_MU: f64 = 0.01;
+/// edit_cost`). 0.04 weighs a plan that changes every vertex's weights by
+/// 0.05 (L1) like 0.002 of energy: joint falloff repairs clear it, while
+/// sub-point energy noise on healthy neighbours leaves the input alone.
+const EDIT_MU: f64 = 0.04;
 
 fn summary(r: &Report) -> Summary {
     Summary { score: r.score, pass: r.pass, fails: r.findings.iter().filter(|f| f.severity == "fail").count() }
@@ -1091,10 +1105,15 @@ pub fn fix(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     };
     let mut without = fix_once(file, model, ctx, &plain);
     let key = |r: &FixResult| (r.report_after.pass, r.report_after.score);
-    let better_without = match (with.torn_cm2, without.torn_cm2) {
-        // Judged by what is seen when the guard is on.
-        (Some(a), Some(b)) => b + 1e-9 < a,
-        _ => key(&without) > key(&with),
+    let better_without = if with.report_after.pass != without.report_after.pass {
+        without.report_after.pass
+    } else {
+        match (with.torn_cm2, without.torn_cm2) {
+            // Judged by what is seen when the guard is on; when tears tie,
+            // the score still decides (`an_external_candidate_never_hurts`).
+            (Some(a), Some(b)) if (a - b).abs() > 1e-6 => b < a,
+            _ => key(&without) > key(&with),
+        }
     };
     if better_without {
         without.fix.methods = with.fix.methods.clone();
@@ -1229,20 +1248,8 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
             Method::Smooth => {
                 push("despeckle".into(), cleanup(model, ctx, &ev0, false), &mut cands);
                 push("smooth".into(), cleanup(model, ctx, &ev0, true), &mut cands);
-                // One side's weights copied onto the other: generated
-                // weights are lopsided where the body is not (a crotch
-                // strip 64/23 between the thighs); the region pick and the
-                // headline choose the better side per region.
                 if o.headline_guard {
                     push("own-bones".into(), own_bones(model, ctx), &mut cands);
-                    if let Some(w) = crotch_to_pelvis(model) {
-                        push("crotch-to-pelvis".into(), w, &mut cands);
-                    }
-                    for (name, from_left) in [("mirror-left", true), ("mirror-right", false)] {
-                        if let Some(w) = mirror(model, from_left) {
-                            push(name.into(), w, &mut cands);
-                        }
-                    }
                 }
             }
             Method::Geodesic => {
@@ -1488,14 +1495,31 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         (1..cands.len()).filter(|&c| useful(&cands[c])).flat_map(|c| measure(&cands, c, &input_base)).collect();
     let p1 = problem(moves.clone(), 0.01);
     let (mut choice, mut w, mut best_real, mut exact) = choose(&cands, &p1, "pick 1", &input_base.choice);
+    let mut groups: Vec<(&Ctx, bool)> = vec![(ctx, false)];
+    if let Some(m) = o.motion {
+        groups.push((m, true));
+    }
+    let area = crate::owner::vertex_areas(model);
+    let total_area: f64 = area.iter().sum::<f64>().max(1e-12);
+    let tears_pct = |wt: &Weights| -> Vec<f64> {
+        groups
+            .iter()
+            .map(|&(c, m)| {
+                let t = crate::owner::torn(model, c, wt, m);
+                (0..model.nverts()).filter(|&v| t[v]).map(|v| area[v]).sum::<f64>() / total_area * 100.0
+            })
+            .collect()
+    };
+    let tin_pct = if o.headline_guard { tears_pct(&model.weights) } else { Vec::new() };
     // Every stage's result is judged on the mesh; the fix is the best one
-    // that breaks no rule (passes the gate first, then score), so a later
-    // stage never undoes an earlier good one. Hard rule: no region may gain
-    // a failing finding it did not have.
+    // that breaks no rule (matching `compare --zoom`: gate first, then tears
+    // when the headline judges, then score), so a later stage never undoes
+    // an earlier good one. Hard rule: no region may gain a failing finding
+    // it did not have.
     let new_fails = |rep: &Report| {
         rep.findings.iter().any(|f| f.severity == "fail" && !rep0.findings.iter().any(|g| g.severity == "fail" && g.region == f.region))
     };
-    type Kept = (Vec<usize>, Weights, Eval, Report);
+    type Kept = (Vec<usize>, Weights, Eval, Report, Vec<f64>);
     let mut kept: Option<Kept> = None;
     let consider = |kept: &mut Option<Kept>, choice: &[usize], w: &Weights| -> bool {
         let ev = evaluate(model, ctx, w);
@@ -1512,8 +1536,27 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         if new_fails(&rep) {
             return false;
         }
-        if kept.as_ref().is_none_or(|k| (rep.pass, rep.score) > (k.3.pass, k.3.score)) {
-            *kept = Some((choice.to_vec(), w.clone(), ev, rep));
+        let tp = if o.headline_guard { tears_pct(w) } else { Vec::new() };
+        let beats = |k: &Kept| -> bool {
+            if rep.pass != k.3.pass {
+                return rep.pass;
+            }
+            if o.headline_guard {
+                let worse_new = tp.iter().zip(&tin_pct).any(|(a, b)| *a > *b + 1e-9);
+                let worse_old = k.4.iter().zip(&tin_pct).any(|(a, b)| *a > *b + 1e-9);
+                if worse_new != worse_old {
+                    return !worse_new;
+                }
+                let sa: f64 = tp.iter().sum();
+                let sb: f64 = k.4.iter().sum();
+                if (sa - sb).abs() > 0.05 * groups.len() as f64 {
+                    return sa < sb;
+                }
+            }
+            rep.score > k.3.score
+        };
+        if kept.as_ref().is_none_or(beats) {
+            *kept = Some((choice.to_vec(), w.clone(), ev, rep, tp));
         }
         true
     };
@@ -1658,19 +1701,33 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         }
     }
     let (mut choice, mut w, mut ev, mut rep1) = match kept {
-        Some(k) => k,
+        Some((c, w, ev, rep, _)) => (c, w, ev, rep),
         None => (vec![0; nr], model.weights.clone(), evaluate(model, ctx, &model.weights), rep0.clone()),
     };
-    let mut groups: Vec<(&Ctx, bool)> = vec![(ctx, false)];
-    if let Some(m) = o.motion {
-        groups.push((m, true));
+    // Headline-only candidates: copying one side onto the other or routing
+    // other-leg weight to the pelvis repairs lopsided generated crotches
+    // where they actually reduce torn skin, without letting the continuous
+    // ROM energy search overwrite symmetric healthy limbs (CesiumMan, MPFB).
+    if o.headline_guard && o.methods.contains(&Method::Smooth) {
+        if let Some(wc) = crotch_to_pelvis(model) {
+            push("crotch-to-pelvis".into(), wc, &mut cands);
+        }
+        for (name, from_left) in [("mirror-left", true), ("mirror-right", false)] {
+            if let Some(wm) = mirror(model, from_left) {
+                push(name.into(), wm, &mut cands);
+            }
+        }
     }
-    // Headline choice: a region that still tears takes the candidate that
-    // tears least there, if that is clearly less (2 cm^2 and a tenth), its
-    // weights blended in at the seams. The score's pick can't see what a
-    // person sees (Tripo's crotch, 2026-11-13); this can.
+    // Headline choice: a failing region that still tears takes the candidate
+    // that tears least there, if that is clearly less (2 cm^2 and a tenth)
+    // AND obeys the same deformation rules as `pick` and `compare --zoom`:
+    // never turning a passing rig into a failing one, never adding a new
+    // failing finding, and never pushing a region past its energy cap (on
+    // fused robes and crotches, an uncapped tear override trades wrong-bone
+    // drag for 2.0-3.4x flat tent-sheet stretching across the legs). Among
+    // candidates with similar tears, smaller weight changes from the input
+    // win so repairs stay closer to professional rigs.
     if o.headline_guard && cands.len() > 1 {
-        let area = crate::owner::vertex_areas(model);
         let k = crate::owner::BODY_M / crate::owner::height(model);
         // Torn area per region, per group (poses, clips), in cm^2.
         let torn_area = |wt: &Weights| -> Vec<Vec<f64>> {
@@ -1689,40 +1746,49 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         let sum_r = |a: &[Vec<f64>], r: usize| a.iter().map(|g| g[r]).sum::<f64>();
         let total = |a: &[Vec<f64>], g: usize| a[g].iter().sum::<f64>();
         let cur_a = torn_area(&w);
-        if (0..nr).any(|r| sum_r(&cur_a, r) > 0.0) {
+        if (0..nr).any(|r| failing[r] && sum_r(&cur_a, r) > 0.0) {
+            let cur_re = region_energy(ctx, &ev);
+            let cap_r = |r: usize| orig_e[r].max(cur_re[r]) * 1.1 + 0.01;
+            let cand_l1: Vec<Vec<f64>> = cands
+                .iter()
+                .map(|c| {
+                    let mut s = vec![0.0; nr];
+                    for v in 0..model.nverts() {
+                        s[ctx.vregion[v] as usize] += 0.5 * l1(&c.w[v], &model.weights[v]);
+                    }
+                    for r in 0..nr {
+                        s[r] /= size[r].max(1.0);
+                    }
+                    s
+                })
+                .collect();
+            const STAY_NEAR_CM2: f64 = 15.0;
             let cand_a: Vec<Vec<Vec<f64>>> = cands.iter().map(|c| torn_area(&c.w)).collect();
             let tin = &cand_a[0];
             debug_assert_eq!(cands[0].name, "original");
             let worse_than_input = |a: &[Vec<f64>]| (0..groups.len()).any(|g| total(a, g) > total(tin, g) + 1e-9);
+            let must_pass = rep0.pass || (rep1.pass && !worse_than_input(&cur_a));
             let mut with_cur = vec![Candidate { name: "current".into(), w: w.clone(), region_e: Vec::new() }];
             with_cur.extend(cands.iter().map(|c| Candidate { name: c.name.clone(), w: c.w.clone(), region_e: Vec::new() }));
             let all = vec![true; model.nverts()];
             let original = 1;
             let sum_all = |a: &[Vec<f64>]| (0..groups.len()).map(|g| total(a, g)).sum::<f64>();
-            // A region takes the candidate tearing least there, summed over
-            // the groups, if that is clearly less than now; `strict` also
-            // asks that no group tear more there than now. Blended at the
-            // seams, regions interact: while a group (poses, clips) tears
-            // more in all than the input, the region adding most to it over
-            // the input's takes the input's weights (the fix must not trade
-            // one for the other). Both ways are tried and the one tearing
-            // least kept (round 3: strict won on Pum cut, 0.33 against
-            // 0.67 % on the clips; loose on Maeva, whose pick tore more than
-            // the input).
             let choose = |strict: bool| -> Option<(Vec<usize>, Weights, Vec<Vec<f64>>)> {
                 let mut pick = vec![0usize; nr];
                 for r in 0..nr {
                     let cur = sum_r(&cur_a, r);
-                    if cur <= 0.0 {
+                    if !failing[r] || cur <= 0.0 {
                         continue;
                     }
                     let best = cand_a
                         .iter()
                         .enumerate()
-                        .filter(|(_, a)| !strict || (0..groups.len()).all(|g| a[g][r] <= cur_a[g][r] + 1e-9))
-                        .map(|(i, a)| (i, sum_r(a, r)))
+                        .filter(|&(i, a)| {
+                            cands[i].region_e[r] <= cap_r(r) + 1e-9 && (!strict || (0..groups.len()).all(|g| a[g][r] <= cur_a[g][r] + 1e-9))
+                        })
+                        .map(|(i, a)| (i, sum_r(a, r) + STAY_NEAR_CM2 * cand_l1[i][r]))
                         .fold((usize::MAX, f64::MAX), |b, x| if x.1 < b.1 { x } else { b });
-                    if best.0 != usize::MAX && best.1 + (0.1 * cur).max(2.0) < cur {
+                    if best.0 != usize::MAX && sum_r(&cand_a[best.0], r) + (0.1 * cur).max(2.0) < cur {
                         pick[r] = best.0 + 1;
                     }
                 }
@@ -1739,6 +1805,22 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                         match back {
                             Some(r) => {
                                 pick[r] = original;
+                                continue;
+                            }
+                            None => return None,
+                        }
+                    }
+                    let ev2 = evaluate_with(model, ctx, &w2, false);
+                    let rep2 = build(file, model, ctx, &ev2);
+                    let re2 = region_energy(ctx, &ev2);
+                    if new_fails(&rep2) || (must_pass && !rep2.pass) || (0..nr).any(|r| re2[r] > cap_r(r) + 1e-9) {
+                        let fallback = if worse_than_input(&cur_a) { original } else { 0 };
+                        let back = (0..nr)
+                            .filter(|&r| pick[r] > 0 && pick[r] != fallback)
+                            .max_by(|&a, &b| (re2[a] - cap_r(a)).total_cmp(&(re2[b] - cap_r(b))).then(b.cmp(&a)));
+                        match back {
+                            Some(r) => {
+                                pick[r] = fallback;
                                 continue;
                             }
                             None => return None,
@@ -1803,32 +1885,20 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     // tears more skin than the input on the clips or on the poses (any
     // amount), the input comes back (character line round 3: a fix kept a
     // worse rig, 2026-11-14).
-    let area = crate::owner::vertex_areas(model);
-    let total_area: f64 = area.iter().sum::<f64>().max(1e-12);
-    let tears_pct = |wt: &Weights| -> Vec<f64> {
-        groups
-            .iter()
-            .map(|&(c, m)| {
-                let t = crate::owner::torn(model, c, wt, m);
-                (0..model.nverts()).filter(|&v| t[v]).map(|v| area[v]).sum::<f64>() / total_area * 100.0
-            })
-            .collect()
-    };
     let mut tears = (Vec::new(), Vec::new());
     if o.headline_guard {
-        let tin = tears_pct(&model.weights);
-        let mut tout = if w == model.weights { tin.clone() } else { tears_pct(&w) };
-        if tout.iter().zip(&tin).any(|(a, b)| *a > *b + 1e-9) {
+        let mut tout = if w == model.weights { tin_pct.clone() } else { tears_pct(&w) };
+        if tout.iter().zip(&tin_pct).any(|(a, b)| *a > *b + 1e-9) {
             if std::env::var_os("WF_DEBUG").is_some() {
-                eprintln!("never worse: tears {tout:?} against the input's {tin:?}; the input comes back");
+                eprintln!("never worse: tears {tout:?} against the input's {tin_pct:?}; the input comes back");
             }
             w = model.weights.clone();
             ev = evaluate(model, ctx, &w);
             rep1 = build(file, model, ctx, &ev);
             choice = vec![0; nr];
-            tout = tin.clone();
+            tout = tin_pct.clone();
         }
-        tears = (tin, tout);
+        tears = (tin_pct, tout);
     }
     let names: Vec<String> = groups.iter().map(|&(_, m)| if m { "game clips".to_string() } else { "poses".to_string() }).collect();
     let torn_cm2 = o.headline_guard.then(|| {
@@ -1876,8 +1946,8 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
         regions,
         findings_before: rep0.findings.clone(),
         findings_after: rep1.findings.clone(),
-        tears_before: names.iter().cloned().zip(tears.0.iter().map(|x| (x * 100.0).round() / 100.0)).collect(),
-        tears_after: names.iter().cloned().zip(tears.1.iter().map(|x| (x * 100.0).round() / 100.0)).collect(),
+        tears_before: names.iter().cloned().zip(tears.0.iter().map(|x| (x * 100.0).round() / 100.0 + 0.0)).collect(),
+        tears_after: names.iter().cloned().zip(tears.1.iter().map(|x| (x * 100.0).round() / 100.0 + 0.0)).collect(),
     };
     FixResult { weights: w, eval: ev, report_before: rep0, report_after: rep1, fix, torn_cm2 }
 }
