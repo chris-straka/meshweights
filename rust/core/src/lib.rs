@@ -7,6 +7,7 @@
 //! and keeps the best per region.
 
 pub mod anatomy;
+pub mod blind;
 pub mod closeness;
 pub mod fix;
 pub mod fixtures;

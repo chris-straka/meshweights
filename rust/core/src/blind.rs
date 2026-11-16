@@ -1,0 +1,467 @@
+//! Same-frame blind pairs at the game camera, for judging a rig claim
+//! by eye instead of by a number.
+//!
+//! A *claim* is one failing headline finding (`owner.rs`): "this skin
+//! tears", "that part follows the wrong bone". For each claim this
+//! module draws the two rigs at the very frame where the claim is worst,
+//! from one camera, in the character's own paint, with nothing marked
+//! and no rig named: the sides are labelled only LEFT and RIGHT, and
+//! which rig is on which side is flipped by a seeded coin. The judge
+//! answers "left", "right" or "can't tell" per pair. Two extra pairs
+//! keep the judge honest:
+//!
+//! - a *can't-tell control*: the same rig on both sides. Anything but
+//!   "can't tell" means the judge is guessing, and the run fails.
+//! - a *planted bad case*: one side is a copy of a rig with a mirrored
+//!   limb's weights swapped left/right. It must look worse, and the
+//!   tears measure must flag it, or the run fails.
+//!
+//! The game camera is the game's follow camera (HLH `fx::follow_camera`:
+//! 3.0 m behind the character, looking at the chest, the default 45
+//! degree lens), so a whole 1.75 m body fills about 70% of the frame
+//! height. The heading is whichever follow-camera heading shows the
+//! claim best (the in-game camera orbits as the player turns), but the
+//! distance and framing never close in on the fault: what the judge
+//! sees is what the player would see.
+//!
+//! Scoring (`score_pairs`) lays the judge's answers against the tears
+//! measure (kept) and the old 0-100 score. Where the judge and tears
+//! agree against the score, that claim's score verdict is *retired*:
+//! it is recorded as disagreed-and-dropped, never as evidence.
+
+use crate::math::Vec3;
+use crate::metrics::Ctx;
+use crate::owner;
+use crate::paint::Paint;
+use crate::render::{Fit, Image, View, draw_mesh, fit};
+use crate::scene::{Model, Weights, normalize_vw};
+use crate::skin::lbs;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// The game's follow-camera distance behind the character, metres
+/// (HLH: `fence.distance.unwrap_or(3.0)` in `follow_camera`).
+pub const GAME_CAM_DISTANCE_M: f64 = 3.0;
+/// The game camera's vertical field of view, degrees (Bevy's
+/// `Camera3d::default()` projection, which the game cameras use).
+pub const GAME_CAM_FOV_DEG: f64 = 45.0;
+
+/// How much of the frame height a 1.75 m body fills at the game
+/// camera: `1.75 / (2 * 3.0 * tan(45deg / 2))`, about 0.70.
+pub fn game_frame_share() -> f64 {
+    owner::BODY_M / (2.0 * GAME_CAM_DISTANCE_M * (GAME_CAM_FOV_DEG * 0.5).to_radians().tan())
+}
+
+fn splitmix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Which side rig A goes on for `pair`, by a seeded coin (true: A is
+/// on the left). Deterministic for a given seed, so a judged run can
+/// be re-made exactly.
+pub fn a_on_left(seed: u64, pair: usize) -> bool {
+    let mut s = seed ^ (pair as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
+    splitmix(&mut s) & 1 == 0
+}
+
+/// A seeded shuffle of `0..n` (the order pairs are presented in, so
+/// the control and the planted case are not in a known place).
+pub fn presentation_order(n: usize, seed: u64) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut s = seed ^ 0xA076_1D64_78BD_642F;
+    for i in (1..n).rev() {
+        let j = (splitmix(&mut s) % (i as u64 + 1)) as usize;
+        idx.swap(i, j);
+    }
+    idx
+}
+
+/// One rig at one frame, ready to draw blind.
+pub struct BlindSide<'a> {
+    pub model: &'a Model,
+    pub ctx: &'a Ctx,
+    pub weights: &'a Weights,
+    pub paint: &'a Paint,
+}
+
+/// The heading that shows the marked skin best, of the headings a
+/// follow camera can sit at (every 30 degrees, three heights).
+pub fn claim_view(side: &BlindSide, pose: usize, marked: &[bool]) -> View {
+    let posed = lbs(side.model, &side.ctx.mats[pose.min(side.ctx.mats.len().saturating_sub(1))], side.weights);
+    crate::render::best_view(&posed, &side.model.tris, marked)
+}
+
+/// The fit of the game camera for a pair: one centre for both rigs,
+/// the scale fixed by the follow camera's distance and lens, so the
+/// body fills `game_frame_share()` of the frame height whatever the
+/// pose does.
+pub fn game_fit(view: &View, posed: &[&[Vec3]], rest_height: f64, cell_w: usize, cell_h: usize) -> Fit {
+    let base = fit(view, posed, cell_w, cell_h);
+    let visible = rest_height.max(1e-9) / game_frame_share();
+    Fit { cx: base.cx, cy: base.cy, ppu: cell_h as f64 / visible }
+}
+
+fn blind_colors(model: &Model, paint: &Paint) -> Vec<[f64; 3]> {
+    // The character's own paint, dimmed the way the finding sheets
+    // dim it, so shape reads first and paint second.
+    (0..model.nverts())
+        .map(|v| {
+            let c = paint.rgb[v];
+            let l = 0.3 * c[0] as f64 + 0.59 * c[1] as f64 + 0.11 * c[2] as f64;
+            [
+                0.15 + 0.6 * (0.7 * c[0] as f64 + 0.3 * l),
+                0.15 + 0.6 * (0.7 * c[1] as f64 + 0.3 * l),
+                0.15 + 0.6 * (0.7 * c[2] as f64 + 0.3 * l),
+            ]
+        })
+        .collect()
+}
+
+/// One side's picture: the whole body at `pose` from `view`, framed
+/// by `f`, labelled only with `label` ("LEFT" or "RIGHT").
+pub fn cell_image(side: &BlindSide, pose: usize, view: &View, f: Fit, w: usize, h: usize, label: &str) -> Image {
+    let mut img = Image::new(w, h, crate::render::BG);
+    img.rect(2, 2, w - 4, h - 4, [32, 35, 42]);
+    let posed = lbs(side.model, &side.ctx.mats[pose.min(side.ctx.mats.len().saturating_sub(1))], side.weights);
+    let colors = blind_colors(side.model, side.paint);
+    draw_mesh(&mut img, 2, 2, w - 4, h - 4, &posed, &side.model.tris, &colors, view, f);
+    if !label.is_empty() {
+        img.text(12, h - 30, label, 3, [232, 234, 238]);
+    }
+    img
+}
+
+/// The pair as one sheet: the two cells side by side under "PAIR NN"
+/// and the question. No rig name, no score, nothing marked.
+pub fn pair_sheet(left: &Image, right: &Image, pair: usize) -> Image {
+    const HEAD: usize = 52;
+    let mut img = Image::new(left.w + right.w, left.h + HEAD, crate::render::BG);
+    img.text(12, 10, &format!("PAIR {pair:02}"), 3, [232, 234, 238]);
+    img.text(12, 36, "WHICH SIDE'S SKIN BENDS AND FOLLOWS CLEANER? ANSWER LEFT, RIGHT, OR CAN'T TELL.", 1, [150, 156, 168]);
+    for (src, x0) in [(left, 0usize), (right, left.w)] {
+        for y in 0..src.h {
+            for x in 0..src.w {
+                let o = (y * src.w + x) * 3;
+                let d = ((y + HEAD) * img.w + x0 + x) * 3;
+                img.rgb[d..d + 3].copy_from_slice(&src.rgb[o..o + 3]);
+            }
+        }
+    }
+    img
+}
+
+/// The vertices of `dst` that sit where `verts` of `src` sit (nearest
+/// rest position), so a claim made on one rig of a body can be
+/// measured on another rig of the same body.
+pub fn map_vertices(src: &Model, dst: &Model, verts: &[u32]) -> Vec<u32> {
+    if src.nverts() == dst.nverts() && src.rest.iter().zip(&dst.rest).all(|(a, b)| (*a - *b).len() < 1e-6) {
+        return verts.to_vec();
+    }
+    verts
+        .iter()
+        .map(|&v| {
+            let p = src.rest[v as usize];
+            (0..dst.nverts()).min_by(|&i, &j| (dst.rest[i] - p).len().total_cmp(&(dst.rest[j] - p).len())).unwrap_or(0) as u32
+        })
+        .collect()
+}
+
+/// A deliberately bad copy of a rig: the weights of a mirrored limb
+/// pair (left upper arm with right upper arm, and so on) swapped, so
+/// each side follows the other side's bone. Returns the weights, the
+/// frame where the swap tears most, that tear's vertices, and what
+/// was planted. `None` when the skeleton has no mirrored limb pair
+/// the swap can tear.
+pub fn planted_bad(model: &Model, ctx: &Ctx, motion: bool) -> Option<(Weights, usize, Vec<u32>, String)> {
+    let roles = &model.skel.anatomy.roles;
+    let mut best: Option<(Weights, usize, Vec<u32>, String, usize)> = None;
+    for base in ["upper_arm", "forearm", "thigh", "shin", "hand", "foot"] {
+        let (Some(l), Some(r)) = (roles.get(&format!("{base}.L")), roles.get(&format!("{base}.R"))) else { continue };
+        let mut swap: BTreeMap<u32, u32> = BTreeMap::new();
+        for (a, b) in l.iter().zip(r.iter()) {
+            swap.insert(*a as u32, *b as u32);
+            swap.insert(*b as u32, *a as u32);
+        }
+        if swap.is_empty() {
+            continue;
+        }
+        let w: Weights = model
+            .weights
+            .iter()
+            .map(|vw| normalize_vw(vw.iter().map(|&(j, x)| (swap.get(&j).copied().unwrap_or(j), x)).collect()))
+            .collect();
+        let ev = crate::metrics::evaluate_with(model, ctx, &w, false);
+        let rep = crate::report::build("planted", model, ctx, &ev);
+        let sec = owner::assess(model, ctx, &ev, &rep, &w, motion, "", Vec::new(), String::new());
+        let torn: usize = {
+            let mut t = vec![false; model.nverts()];
+            for f in sec.findings.iter().filter(|f| f.severity == "fail" && f.kind != "limb_through") {
+                for &v in &f.vertices {
+                    t[v as usize] = true;
+                }
+            }
+            t.iter().filter(|&&x| x).count()
+        };
+        if torn == 0 {
+            continue;
+        }
+        let f = sec
+            .findings
+            .iter()
+            .filter(|f| f.severity == "fail" && f.kind != "limb_through")
+            .max_by(|a, b| a.area_cm2.total_cmp(&b.area_cm2))?;
+        let cand = (w, f.worst_pose, f.vertices.clone(), format!("the left and right {base} weights were swapped"), torn);
+        // A swap that tears a real patch is planted enough; do not
+        // shop for a worse one at the price of judging every pair.
+        if torn >= 25 {
+            return Some((cand.0, cand.1, cand.2, cand.3));
+        }
+        if best.as_ref().is_none_or(|b| cand.4 > b.4) {
+            best = Some(cand);
+        }
+    }
+    best.map(|(w, p, v, d, _)| (w, p, v, d))
+}
+
+// ---- The answer key and the scoring of a judge's answers ----
+
+/// One pair as the key records it (never in the judged folder).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairKey {
+    pub pair: usize,
+    /// "claim", "control" (same rig both sides) or "planted".
+    pub category: String,
+    pub focus: String,
+    pub frame: String,
+    pub left_rig: String,
+    pub right_rig: String,
+    /// The answer a sound judge gives: a rig id, or "cant_tell" for
+    /// the control. For a claim, the tears measure's winner.
+    pub expected: String,
+    /// Torn skin on the claim's area per rig, cm^2 (1.75 m body).
+    pub tears_cm2: BTreeMap<String, f64>,
+    pub tears_winner: String,
+    pub score_winner: String,
+}
+
+/// A whole blind run's key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlindKey {
+    pub rig_a: String,
+    pub rig_b: String,
+    pub section: String,
+    pub seed: u64,
+    /// What was planted for the planted bad case.
+    #[serde(default)]
+    pub planted: String,
+    pub tears_pct: BTreeMap<String, f64>,
+    pub scores: BTreeMap<String, f64>,
+    pub pairs: Vec<PairKey>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PairVerdict {
+    pub pair: usize,
+    pub category: String,
+    pub focus: String,
+    pub answer: Option<String>,
+    pub judge_rig: Option<String>,
+    pub tears_winner: String,
+    pub score_winner: String,
+    /// The judge and tears agree against the old score: this claim's
+    /// score verdict is retired.
+    pub score_retired: bool,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BlindVerdict {
+    pub pairs: Vec<PairVerdict>,
+    pub claims_judged: usize,
+    pub judge_agrees_tears: usize,
+    pub score_agrees_judge: usize,
+    pub score_retired_pairs: Vec<usize>,
+    pub control_ok: bool,
+    pub planted_ok: bool,
+    pub planted_tears_ok: bool,
+    /// The run can be believed: the control was answered "can't
+    /// tell", the planted bad side was picked out, and tears flag
+    /// the planted rig too.
+    pub pass: bool,
+}
+
+/// Lays a judge's answers against a run's key. `answers` maps a pair
+/// number to "left", "right" or "cant_tell" (any spelling of can't:
+/// "cant_tell", "can't tell", "cant", "neither").
+pub fn score_pairs(key: &BlindKey, answers: &BTreeMap<usize, String>) -> BlindVerdict {
+    let norm = |s: &str| -> String {
+        let s: String = s.trim().to_lowercase().chars().filter(|c| !matches!(c, '\'' | ' ' | '-' | '_')).collect();
+        if ["canttell", "cant", "neither", "same", "equal"].contains(&s.as_str()) { "cant_tell".into() } else { s }
+    };
+    let mut out = BlindVerdict {
+        pairs: Vec::new(),
+        claims_judged: 0,
+        judge_agrees_tears: 0,
+        score_agrees_judge: 0,
+        score_retired_pairs: Vec::new(),
+        control_ok: false,
+        planted_ok: false,
+        planted_tears_ok: false,
+        pass: false,
+    };
+    let mut saw_control = false;
+    let mut saw_planted = false;
+    for p in &key.pairs {
+        let answer = answers.get(&p.pair).map(|a| norm(a));
+        let judge_rig = match answer.as_deref() {
+            Some("left") => Some(p.left_rig.clone()),
+            Some("right") => Some(p.right_rig.clone()),
+            _ => None,
+        };
+        let mut retired = false;
+        let note: String;
+        match p.category.as_str() {
+            "control" => {
+                saw_control = true;
+                out.control_ok = answer.as_deref() == Some("cant_tell");
+                note = if out.control_ok {
+                    "control: the same rig both sides, answered can't tell".into()
+                } else {
+                    "control FAILED: the same rig on both sides was not answered can't tell".into()
+                };
+            }
+            "planted" => {
+                saw_planted = true;
+                out.planted_ok = judge_rig.as_deref() == Some(p.expected.as_str());
+                out.planted_tears_ok = p.tears_winner == p.expected;
+                note = match (out.planted_ok, out.planted_tears_ok) {
+                    (true, true) => "planted bad case: picked out by the judge, flagged by tears".into(),
+                    (true, false) => "planted bad case: picked out by the judge but NOT flagged by tears".into(),
+                    _ => "planted bad case FAILED: the judge did not pick the unplanted rig".into(),
+                };
+            }
+            _ => {
+                if judge_rig.is_some() {
+                    out.claims_judged += 1;
+                    if judge_rig.as_deref() == Some(p.tears_winner.as_str()) {
+                        out.judge_agrees_tears += 1;
+                    }
+                    if judge_rig.as_deref() == Some(p.score_winner.as_str()) {
+                        out.score_agrees_judge += 1;
+                    }
+                    retired = judge_rig.as_deref() == Some(p.tears_winner.as_str())
+                        && p.score_winner != p.tears_winner
+                        && judge_rig.as_deref() != Some(p.score_winner.as_str());
+                    if retired {
+                        note = "judge and tears agree against the 0-100 score: its verdict on this claim is retired".into();
+                    } else if judge_rig.as_deref() == Some(p.score_winner.as_str()) && p.score_winner != p.tears_winner {
+                        note = "judge backs the score against tears on this claim".into();
+                    } else if judge_rig.as_deref() != Some(p.tears_winner.as_str()) {
+                        note = "judge disagrees with tears on this claim".into();
+                    } else {
+                        note = "judge, tears and score agree".into();
+                    }
+                } else if answer.is_some() {
+                    note = "answered can't tell: tears claim not confirmed by eye".into();
+                } else {
+                    note = "no answer".into();
+                }
+            }
+        }
+        if retired {
+            out.score_retired_pairs.push(p.pair);
+        }
+        out.pairs.push(PairVerdict {
+            pair: p.pair,
+            category: p.category.clone(),
+            focus: p.focus.clone(),
+            answer,
+            judge_rig,
+            tears_winner: p.tears_winner.clone(),
+            score_winner: p.score_winner.clone(),
+            score_retired: retired,
+            note,
+        });
+    }
+    out.pass = saw_control && saw_planted && out.control_ok && out.planted_ok && out.planted_tears_ok;
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_game_camera_frames_a_body_like_the_game() {
+        // 1.75 m at 3.0 m through a 45 degree lens fills ~70%.
+        assert!((game_frame_share() - 0.704).abs() < 0.01, "{}", game_frame_share());
+    }
+
+    #[test]
+    fn the_coin_and_the_order_are_seeded() {
+        let a: Vec<bool> = (1..=8).map(|p| a_on_left(7, p)).collect();
+        assert_eq!(a, (1..=8).map(|p| a_on_left(7, p)).collect::<Vec<_>>());
+        assert!(a.iter().any(|&x| x) && a.iter().any(|&x| !x), "{a:?}");
+        let mut o = presentation_order(6, 3);
+        assert_eq!(o, presentation_order(6, 3));
+        o.sort_unstable();
+        assert_eq!(o, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    fn key_pair(pair: usize, cat: &str, left: &str, right: &str, expected: &str, tears: &str, score: &str) -> PairKey {
+        PairKey {
+            pair,
+            category: cat.into(),
+            focus: "f".into(),
+            frame: "p".into(),
+            left_rig: left.into(),
+            right_rig: right.into(),
+            expected: expected.into(),
+            tears_cm2: BTreeMap::new(),
+            tears_winner: tears.into(),
+            score_winner: score.into(),
+        }
+    }
+
+    #[test]
+    fn scoring_retires_the_score_only_where_the_judge_and_tears_agree_against_it() {
+        let key = BlindKey {
+            rig_a: "a.glb".into(),
+            rig_b: "b.glb".into(),
+            section: "poses".into(),
+            seed: 1,
+            planted: "test plant".into(),
+            tears_pct: BTreeMap::new(),
+            scores: BTreeMap::new(),
+            pairs: vec![
+                key_pair(1, "claim", "A", "B", "B", "B", "A"), // score says A, tears say B
+                key_pair(2, "control", "A", "A", "cant_tell", "tie", "tie"),
+                key_pair(3, "planted", "PLANTED_A", "A", "A", "A", "A"),
+                key_pair(4, "claim", "A", "B", "A", "A", "A"), // all agree
+            ],
+        };
+        let answers: BTreeMap<usize, String> =
+            [(1, "right".to_string()), (2, "can't tell".to_string()), (3, "right".to_string()), (4, "left".to_string())]
+                .into_iter()
+                .collect();
+        let v = score_pairs(&key, &answers);
+        assert!(v.pass, "{v:?}");
+        assert_eq!(v.score_retired_pairs, vec![1]);
+        assert_eq!(v.judge_agrees_tears, 2);
+        assert_eq!(v.score_agrees_judge, 1);
+        // The judge picking the planted side fails the run.
+        let bad: BTreeMap<usize, String> =
+            [(1, "right".to_string()), (2, "cant_tell".to_string()), (3, "left".to_string()), (4, "left".to_string())]
+                .into_iter()
+                .collect();
+        assert!(!score_pairs(&key, &bad).pass);
+        // So does claiming a difference on the control.
+        let bad: BTreeMap<usize, String> =
+            [(1, "right".to_string()), (2, "left".to_string()), (3, "right".to_string()), (4, "left".to_string())].into_iter().collect();
+        assert!(!score_pairs(&key, &bad).pass);
+    }
+}
