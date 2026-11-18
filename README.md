@@ -1,16 +1,16 @@
-# weightforge
+# meshweights
 
 Finds and fixes bad skin weights on rigged game characters, especially
 AI-generated ones (Tripo, SkinTokens, UniRig). Rust core + `weights` CLI + Blender
-extension, same split as retopoforge. GLB in, GLB out, rfcheck-clean.
+extension, same split as retopo. GLB in, GLB out, rfcheck-clean.
 
-rfcheck checks structure (≤4 influences, sums to 1). weightforge moves the
+rfcheck checks structure (≤4 influences, sums to 1). meshweights moves the
 rig through a range of motion, measures what breaks (tears, collapsed
 elbows, a hand that follows the thigh, a cape on the wrong bone, speckled
 weights), repairs it, and proves the repair with numbers and pictures.
 
 Status: P0–P3 and P5's Blender extension built and gated on fixtures; P4
-(owner-rated Tripo set) is open; the genforge hook is built, its live run pending. Gate numbers:
+(owner-rated Tripo set) is open; the assetgen hook is built, its live run pending. Gate numbers:
 [`docs/phase-0.md`](docs/phase-0.md) … [`docs/phase-5.md`](docs/phase-5.md).
 Spec: [PLAN.md](PLAN.md).
 
@@ -143,7 +143,7 @@ method chosen, candidate scores), and with `--sheet` the A/B picture.
 The standard humanoid skeleton has helper bones at the upper arms and thighs
 (`DEF-upper_arm_twist.L` ..., added by motionforge's standardize). Each
 sits on its driver's joint and turns by a share (0.5) of the driver's
-rotation; clips bake that, and weightforge poses them the same way
+rotation; clips bake that, and meshweights poses them the same way
 (`core/src/helpers.rs`: node `extras.helper_bone`, else the `_twist`
 name). Helpers are not pose roles and not regions of their own, and
 noise is judged on what a vertex does (a helper weight counts as half
@@ -179,7 +179,7 @@ and left upper arm volume in `arm_forward.L` (7 verts, front fold).
 Gate unchanged.
 
 Later the same day (exact region pick, bands in limb radii; gate
-unchanged): the genforge rehearsal of the hero (repair-topology with
+unchanged): the assetgen rehearsal of the hero (repair-topology with
 `--skeleton`, 4,459 welded verts) fixes 62.7 -> 76.0 and **passes**,
 where it stopped at 75.7 with one left-arm finding. The same character
 remeshed at 2.5k / 4.5k / 7k verts now fixes to 77.2 / 76.2 / 76.3 (mean
@@ -213,7 +213,7 @@ into the mesh's `extras.unfuse`. On such a file `fix`
 
 A file that was not cut gets neither, and `fix` runs on it as before
 (`check` always reports a file as it is).
-`motionforge/tools/tripo_rig.py --unfuse` runs the cut and keeps it only
+`motion/tools/tripo_rig.py --unfuse` runs the cut and keeps it only
 when the cut copy ranks better. Bench and numbers: `bench/unfuse.py`,
 `docs/unfuse-log.md`. Probes (`rust/core/examples`): `fused_probe` (what
 joins two limbs, cross-sections, failing vertices per pose),

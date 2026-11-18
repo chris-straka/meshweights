@@ -2,7 +2,7 @@
 
 Automatic skin-weight QA and repair for game-bound characters. Written
 2026-10-04 for the games' asset pipeline (`~/Games/_tools/asset-pipeline.md`)
-and genforge's `gen character` chain (`~/Games/_media/genforge/PLAN.md` P7).
+and genforge's `gen character` chain (`~/Games/_media/assetgen/PLAN.md` P7).
 
 ## Why
 

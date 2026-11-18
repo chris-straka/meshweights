@@ -1,4 +1,4 @@
-# weightforge — agent notes
+# meshweights — agent notes
 
 One rules file only: this `AGENTS.md` is it — never create a `CLAUDE.md` in this folder (Muse ignores it and warns while both exist).
 
@@ -14,7 +14,7 @@ measured gate numbers: `docs/phase-N.md`.
 - Never commit the owner's game assets, nor their names or paths in
   tracked files ("the owner's corpus"). `bench/models/` and
   `bench/results/` are gitignored.
-- Never move vertices or rename/reparent bones: weightforge only writes
+- Never move vertices or rename/reparent bones: meshweights only writes
   JOINTS_0/WEIGHTS_0.
 - No GPL code in `rust/`. Check a crate's licence before adding it.
 - GLB container/accessor IO and the rig-contract constants (piece words,
