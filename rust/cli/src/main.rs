@@ -28,7 +28,7 @@ USAGE:
                   [--poses-b rom_b.ron]
   weights probe   <in.glb> --out <dir> [--poses rom.ron] [--number-from N]
   weights blind   <a.glb> <b.glb> --out <dir> [--motion hero.glb] [--motion-clips ...]
-                  [--seed N] [--top N] [--key key.json]
+                  [--seed N] [--top N] [--key key.json] [--camera follow|talk]
                   (same-frame blind pairs per claim, at the game camera)
   weights blind-score <dir> --answers answers.json [--key key.json]
                   (lay a judge's answers against tears and the old score)
@@ -105,6 +105,11 @@ BLIND:
   pair_NN_right.png, and pairs.json (the question and the focus of
   each pair, no answers). The answer key goes beside the folder as
   <dir>.key.json (--key says where), never in it.
+  --camera talk draws from the game's talk camera instead (the close
+  shot: 1.3 m from the face, a 38-degree lens, 24 degrees off the front,
+  head, shoulders and chest in frame): only claims whose skin is in that
+  frame are kept (the key lists the others as out_of_frame), and one
+  more pair shows both rigs' faces at the first frame.
 
 BLIND-SCORE:
   Answers are JSON: one object mapping pair_01, pair_02... to left,
@@ -188,6 +193,7 @@ const VALUED: &[&str] = &[
     "--kind",
     "--top",
     "--seed",
+    "--camera",
     "--answers",
     "--key",
 ];
@@ -589,6 +595,11 @@ fn cmd_blind(a: &Args) -> ExitCode {
         Some(_) => return fail("--seed needs an integer"),
     };
     let kinds: Option<Vec<String>> = a.get("--kind").map(|k| k.split(',').map(|s| s.trim().to_string()).collect());
+    let camera = match a.get("--camera").map(wf::blind::Camera::parse) {
+        None => wf::blind::Camera::Follow,
+        Some(Some(c)) => c,
+        Some(None) => return fail("--camera is follow or talk"),
+    };
     let set = match load_poses(a) {
         Ok(s) => s,
         Err(e) => return fail(e),
@@ -662,6 +673,17 @@ fn cmd_blind(a: &Args) -> ExitCode {
         }
     }
     claims.sort_by(|x, y| y.area.total_cmp(&x.area));
+    let mut out_of_frame: Vec<String> = Vec::new();
+    if camera == wf::blind::Camera::Talk {
+        claims.retain(|c| {
+            let rest = if c.src == 0 { &ca.model.rest } else { &cb.model.rest };
+            let keep = wf::blind::in_talk_frame(rest, &c.verts);
+            if !keep {
+                out_of_frame.push(format!("{}: {}", c.kind.replace('_', " "), c.part));
+            }
+            keep
+        });
+    }
     claims.truncate(top);
     // The planted bad case, made from rig A on the judged pose group.
     let Some((planted_w, planted_pose, planted_verts, planted_what)) = wf::blind::planted_bad(&ca.model, ctxa, use_clips) else {
@@ -715,6 +737,23 @@ fn cmd_blind(a: &Args) -> ExitCode {
             tears_winner: tw.clone(),
             score_winner: winner_of("A", "B", ca.rep.score, cb.rep.score, 1.0, false),
             expected: tw,
+        });
+    }
+    // At the talk camera the faces are judged too, at the first frame.
+    if camera == wf::blind::Camera::Talk {
+        pend.push(Pending {
+            category: "look",
+            focus: "the face and head at the talk camera".into(),
+            frame: ctxa.poses[0].name.clone(),
+            pose: 0,
+            first: "A",
+            second: "B",
+            view_src: 0,
+            marked: Vec::new(),
+            tears_cm2: std::collections::BTreeMap::new(),
+            tears_winner: "tie".into(),
+            score_winner: winner_of("A", "B", ca.rep.score, cb.rep.score, 1.0, false),
+            expected: "tie".into(),
         });
     }
     // The control sits at the first claim's frame (or the planted one).
@@ -779,10 +818,25 @@ fn cmd_blind(a: &Args) -> ExitCode {
         for &v in wf::blind::map_vertices(src_model, vs.model, &p.marked).iter() {
             marked[v as usize] = true;
         }
-        let view = wf::blind::claim_view(&vs, p.pose, &marked);
         let posed = |s: &wf::blind::BlindSide<'_>| wf::skin::lbs(s.model, &s.ctx.mats[p.pose.min(s.ctx.mats.len() - 1)], s.weights);
         let (pl, pr) = (posed(&ls), posed(&rs));
-        let fit = wf::blind::game_fit(&view, &[&pl, &pr], wf::owner::height(ls.model), 520, 640);
+        let (view, fit) = match camera {
+            wf::blind::Camera::Follow => {
+                let view = wf::blind::claim_view(&vs, p.pose, &marked);
+                let fit = wf::blind::game_fit(&view, &[&pl, &pr], wf::owner::height(ls.model), 520, 640);
+                (view, fit)
+            }
+            wf::blind::Camera::Talk => {
+                let rest = &vs.model.rest;
+                let mid = rest.iter().map(|q| q.x).sum::<f64>() / rest.len().max(1) as f64;
+                let picked: Vec<usize> = marked.iter().enumerate().filter(|(_, m)| **m).map(|(i, _)| i).collect();
+                let side_x =
+                    if picked.is_empty() { 1.0 } else { picked.iter().map(|&i| rest[i].x).sum::<f64>() / picked.len() as f64 - mid };
+                let view = wf::blind::talk_view(side_x);
+                let fit = wf::blind::talk_fit(&view, &ca.model.rest, wf::owner::height(&ca.model), 640);
+                (view, fit)
+            }
+        };
         let (limg, rimg) = (
             wf::blind::cell_image(&ls, p.pose, &view, fit, 520, 640, "LEFT"),
             wf::blind::cell_image(&rs, p.pose, &view, fit, 520, 640, "RIGHT"),
@@ -802,7 +856,11 @@ fn cmd_blind(a: &Args) -> ExitCode {
         pub_pairs.push(serde_json::json!({
             "pair": pair, "file": fp.file_name().unwrap().to_string_lossy(), "left": fl.file_name().unwrap().to_string_lossy(),
             "right": fr.file_name().unwrap().to_string_lossy(), "focus": p.focus, "frame": p.frame,
-            "question": "Which side's skin bends and follows cleaner in this frame? Answer left, right, or cant_tell."
+            "question": if p.category == "look" {
+                "Which side's face and head look cleaner, like one well-made person? Answer left, right, or cant_tell."
+            } else {
+                "Which side's skin bends and follows cleaner in this frame? Answer left, right, or cant_tell."
+            }
         }));
         key_pairs.push(wf::blind::PairKey {
             pair,
@@ -839,6 +897,8 @@ fn cmd_blind(a: &Args) -> ExitCode {
         .into_iter()
         .collect(),
         pairs: key_pairs,
+        camera: camera.name().into(),
+        out_of_frame,
     };
     let key_path = match a.get("--key") {
         Some(k) => PathBuf::from(k),
@@ -851,7 +911,8 @@ fn cmd_blind(a: &Args) -> ExitCode {
         return fail(format!("{}: {e}", key_path.display()));
     }
     println!(
-        "blind: {} pairs ({} claims, a can't-tell control, a planted bad case) on the {sec_name}; A torn {:.2}%, B torn {:.2}%; key {}",
+        "blind ({} camera): {} pairs ({} claims, a can't-tell control, a planted bad case) on the {sec_name}; A torn {:.2}%, B torn {:.2}%; key {}",
+        camera.name(),
         pend.len(),
         claims.len(),
         seca.tears_pct,
@@ -1380,7 +1441,7 @@ fn flags_of(cmd: &str) -> Option<Vec<&'static str>> {
         "check" => &["--json", "--vertex-json", "--motion", "--motion-clips"],
         "sheet" => &["--out", "--cols"],
         "probe" => &["--out", "--number-from"],
-        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key"],
+        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key", "--camera"],
         "blind-score" => &["--answers", "--key"],
         "show" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
         "before-after" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],

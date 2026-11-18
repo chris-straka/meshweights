@@ -52,6 +52,100 @@ pub fn game_frame_share() -> f64 {
     owner::BODY_M / (2.0 * GAME_CAM_DISTANCE_M * (GAME_CAM_FOV_DEG * 0.5).to_radians().tan())
 }
 
+/// The game's talk camera, the close shot (HLH `talk::frame`, `Shot::Close`):
+/// the eye about 1.3 m from the speaker's face (three quarters of a
+/// 1.73 m talk distance, at most 1.3 m), level with it, aimed 0.1 m under
+/// it, through a 38 degree lens, 24 degrees off the line between the two.
+pub const TALK_CAM_DISTANCE_M: f64 = 1.3;
+pub const TALK_CAM_FOV_DEG: f64 = 38.0;
+/// The face's height as a share of the body's (HLH `talk::FACE`).
+pub const TALK_FACE_SHARE: f64 = 0.915;
+/// The talk camera aims this far under the face, metres (1.75 m body).
+pub const TALK_AIM_BELOW_M: f64 = 0.1;
+/// How far off the line between the two the close shot sits, degrees.
+pub const TALK_YAW_DEG: f64 = 24.0;
+/// Level with the face, looking 0.1 m under it from 1.3 m.
+pub const TALK_PITCH_DEG: f64 = 4.4;
+
+/// How much of a 1.75 m body the talk camera's frame height shows,
+/// metres: `2 * 1.3 * tan(19deg)`, about 0.90.
+pub fn talk_visible_m() -> f64 {
+    2.0 * TALK_CAM_DISTANCE_M * (TALK_CAM_FOV_DEG * 0.5).to_radians().tan()
+}
+
+/// The talk frame's lowest and highest points, as shares of the body's
+/// height from the floor (about 0.60 to 1.11: head, shoulders, chest).
+pub fn talk_frame_span() -> (f64, f64) {
+    let aim = TALK_FACE_SHARE - TALK_AIM_BELOW_M / owner::BODY_M;
+    let half = 0.5 * talk_visible_m() / owner::BODY_M;
+    (aim - half, aim + half)
+}
+
+/// Which camera a blind run draws from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Camera {
+    /// HLH's follow camera: the whole body, about 70% of the frame.
+    Follow,
+    /// HLH's talk camera, the close shot: head, shoulders and chest.
+    Talk,
+}
+
+impl Camera {
+    pub fn parse(s: &str) -> Option<Camera> {
+        match s {
+            "follow" => Some(Camera::Follow),
+            "talk" => Some(Camera::Talk),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Camera::Follow => "follow",
+            Camera::Talk => "talk",
+        }
+    }
+}
+
+/// The talk camera's view of a claim: 24 degrees off the front, on the
+/// side the claim is on (`side_x`: the claim's x less the body's middle;
+/// the character faces +Z, its left is +X).
+pub fn talk_view(side_x: f64) -> View {
+    View { yaw_deg: if side_x < 0.0 { -TALK_YAW_DEG } else { TALK_YAW_DEG }, pitch_deg: TALK_PITCH_DEG }
+}
+
+/// The talk camera's fit: one centre for both rigs, under the face of the
+/// rest body (`rest`), the scale fixed by the talk camera's distance and
+/// lens, so a body `rest_height` tall shows `talk_visible_m()` of it per
+/// 1.75 m, whatever the pose does.
+pub fn talk_fit(view: &View, rest: &[Vec3], rest_height: f64, cell_h: usize) -> Fit {
+    let floor = rest.iter().map(|p| p.y).fold(f64::MAX, f64::min);
+    let k = rest_height.max(1e-9) / owner::BODY_M;
+    let head_lo = floor + 0.85 * rest_height;
+    let (mut sx, mut sz, mut n) = (0.0, 0.0, 0usize);
+    for p in rest.iter().filter(|p| p.y >= head_lo) {
+        sx += p.x;
+        sz += p.z;
+        n += 1;
+    }
+    let (hx, hz) = if n > 0 { (sx / n as f64, sz / n as f64) } else { (0.0, 0.0) };
+    let aim = crate::math::v3(hx, floor + TALK_FACE_SHARE * rest_height - TALK_AIM_BELOW_M * k, hz);
+    let c = view.to_cam(aim);
+    Fit { cx: c.x, cy: c.y, ppu: cell_h as f64 / (talk_visible_m() * k) }
+}
+
+/// Is a claim inside the talk frame: the mean rest height of its skin
+/// above the frame's lowest point.
+pub fn in_talk_frame(rest: &[Vec3], verts: &[u32]) -> bool {
+    if verts.is_empty() || rest.is_empty() {
+        return false;
+    }
+    let floor = rest.iter().map(|p| p.y).fold(f64::MAX, f64::min);
+    let top = rest.iter().map(|p| p.y).fold(f64::MIN, f64::max);
+    let h = (top - floor).max(1e-9);
+    let mean = verts.iter().map(|&v| rest[v as usize].y).sum::<f64>() / verts.len() as f64;
+    (mean - floor) / h >= talk_frame_span().0
+}
+
 fn splitmix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -261,6 +355,12 @@ pub struct BlindKey {
     pub tears_pct: BTreeMap<String, f64>,
     pub scores: BTreeMap<String, f64>,
     pub pairs: Vec<PairKey>,
+    /// "follow" or "talk" (older keys: follow).
+    #[serde(default)]
+    pub camera: String,
+    /// Claims left out at the talk camera: their skin is under its frame.
+    #[serde(default)]
+    pub out_of_frame: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -402,6 +502,25 @@ mod tests {
     }
 
     #[test]
+    fn the_talk_camera_frames_the_head_shoulders_and_chest() {
+        // 2 * 1.3 m * tan(19 deg) = 0.895 m of a 1.75 m body.
+        assert!((talk_visible_m() - 0.895).abs() < 0.005, "{}", talk_visible_m());
+        let (lo, hi) = talk_frame_span();
+        assert!((0.55..0.65).contains(&lo) && hi > 1.0, "{lo} {hi}");
+        // A 1.75 m column of points: the fit centres under the face and
+        // shows the top of the head, not the knees.
+        let rest: Vec<Vec3> = (0..=175).map(|i| crate::math::v3(0.0, i as f64 * 0.01, 0.0)).collect();
+        let view = talk_view(1.0);
+        let f = talk_fit(&view, &rest, 1.75, 640);
+        let screen_y = |y: f64| 320.0 - (view.to_cam(crate::math::v3(0.0, y, 0.0)).y - f.cy) * f.ppu;
+        assert!(screen_y(1.75) > 0.0, "the crown is in the frame");
+        assert!(screen_y(0.5) > 640.0, "the knees are under it");
+        assert!(in_talk_frame(&rest, &[160, 170]) && !in_talk_frame(&rest, &[20, 50]));
+        assert_eq!(talk_view(-0.2).yaw_deg, -TALK_YAW_DEG);
+        assert_eq!(Camera::parse("talk"), Some(Camera::Talk));
+    }
+
+    #[test]
     fn the_coin_and_the_order_are_seeded() {
         let a: Vec<bool> = (1..=8).map(|p| a_on_left(7, p)).collect();
         assert_eq!(a, (1..=8).map(|p| a_on_left(7, p)).collect::<Vec<_>>());
@@ -437,6 +556,8 @@ mod tests {
             planted: "test plant".into(),
             tears_pct: BTreeMap::new(),
             scores: BTreeMap::new(),
+            camera: "follow".into(),
+            out_of_frame: Vec::new(),
             pairs: vec![
                 key_pair(1, "claim", "A", "B", "B", "B", "A"), // score says A, tears say B
                 key_pair(2, "control", "A", "A", "cant_tell", "tie", "tie"),

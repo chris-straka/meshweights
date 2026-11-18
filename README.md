@@ -41,7 +41,7 @@ Pure Rust, permissive deps only (serde, serde_json, ron, png, rayon).
                                                     # other way the headline retires it): worst poses
                                                     # first, close-ups in clay, a loop for each pose
     weights probe   hero.glb --out cases/           # unmarked loops for a person to judge
-    weights blind   a.glb b.glb --out pairs/ [--motion hero.glb] [--seed N] [--top N]
+    weights blind   a.glb b.glb --out pairs/ [--motion hero.glb] [--seed N] [--top N] [--camera follow|talk]
                                                     # same-frame blind pairs per claim at the
                                                     # game camera, plus a can't-tell control and
                                                     # a planted bad case; key beside the folder
@@ -84,6 +84,11 @@ the old score: where judge and tears agree against the score, that
 claim's score verdict is retired. The `compare --zoom` headline
 follows the same rule. Protocol and fixture numbers:
 [`docs/blind.md`](docs/blind.md); `bench/blind_bench.py` drives runs.
+`--camera talk` draws the pairs from the game's talk camera instead (the
+close shot: 1.3 m from the face through a 38-degree lens, 24 degrees off
+the front, head, shoulders and chest in frame): claims whose skin is under
+that frame are left out (the key lists them as `out_of_frame`), and one
+more pair shows the two rigs' faces at the first frame.
 
 Bone roles come from the skeleton's structure, not names (`core/src/anatomy.rs`):
 feet are chains ending at the floor, legs climb from them, arms reach
