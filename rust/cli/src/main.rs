@@ -773,6 +773,32 @@ fn cmd_blind(a: &Args) -> ExitCode {
         score_winner: "tie".into(),
         expected: "cant_tell".into(),
     });
+    // At the talk camera the planted case is shown where the swap shows most
+    // inside the talk frame with the body upright (its worst frame for the
+    // tears may be a fall, under the frame): the frame whose in-frame skin
+    // the swap moves farthest.
+    let planted_pose = if camera == wf::blind::Camera::Talk {
+        let rest = &ca.model.rest;
+        let floor = rest.iter().map(|q| q.y).fold(f64::MAX, f64::min);
+        let h = wf::owner::height(&ca.model).max(1e-9);
+        let (lo, _) = wf::blind::talk_frame_span();
+        let in_frame: Vec<usize> = (0..rest.len()).filter(|&i| (rest[i].y - floor) / h >= lo).collect();
+        let mut best = (planted_pose, -1.0f64);
+        for i in 0..ctxa.mats.len() {
+            let a_ = wf::skin::lbs(&ca.model, &ctxa.mats[i], &ca.model.weights);
+            if wf::blind::head_share(rest, &a_) < 0.6 {
+                continue;
+            }
+            let p_ = wf::skin::lbs(&ca.model, &ctxa.mats[i], &planted_w);
+            let d: f64 = in_frame.iter().map(|&v| (p_[v] - a_[v]).len()).sum();
+            if d > best.1 {
+                best = (i, d);
+            }
+        }
+        best.0
+    } else {
+        planted_pose
+    };
     let pta: f64 = planted_verts.iter().filter(|&&v| torna[v as usize]).map(|&v| areaa[v as usize] * ka * ka * 1e4).sum();
     let ptp: f64 = planted_verts.iter().filter(|&&v| planted_torn[v as usize]).map(|&v| areaa[v as usize] * ka * ka * 1e4).sum();
     pend.push(Pending {
@@ -827,13 +853,14 @@ fn cmd_blind(a: &Args) -> ExitCode {
                 (view, fit)
             }
             wf::blind::Camera::Talk => {
+                let pa = wf::skin::lbs(&ca.model, &ctxa.mats[p.pose.min(ctxa.mats.len() - 1)], &ca.model.weights);
                 let rest = &vs.model.rest;
                 let mid = rest.iter().map(|q| q.x).sum::<f64>() / rest.len().max(1) as f64;
                 let picked: Vec<usize> = marked.iter().enumerate().filter(|(_, m)| **m).map(|(i, _)| i).collect();
                 let side_x =
                     if picked.is_empty() { 1.0 } else { picked.iter().map(|&i| rest[i].x).sum::<f64>() / picked.len() as f64 - mid };
                 let view = wf::blind::talk_view(side_x);
-                let fit = wf::blind::talk_fit(&view, &ca.model.rest, wf::owner::height(&ca.model), 640);
+                let fit = wf::blind::talk_fit(&view, &ca.model.rest, &pa, wf::owner::height(&ca.model), 640);
                 (view, fit)
             }
         };

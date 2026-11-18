@@ -86,9 +86,11 @@ follows the same rule. Protocol and fixture numbers:
 [`docs/blind.md`](docs/blind.md); `bench/blind_bench.py` drives runs.
 `--camera talk` draws the pairs from the game's talk camera instead (the
 close shot: 1.3 m from the face through a 38-degree lens, 24 degrees off
-the front, head, shoulders and chest in frame): claims whose skin is under
-that frame are left out (the key lists them as `out_of_frame`), and one
-more pair shows the two rigs' faces at the first frame.
+the front, head, shoulders and chest in frame, the frame following the face
+wherever the pose carries it): claims whose skin is under that frame are
+left out (the key lists them as `out_of_frame`), one more pair shows the two
+rigs' faces at the first frame, and the planted case is shown at the frame
+where the swap moves the in-frame skin most with the body upright.
 
 Bone roles come from the skeleton's structure, not names (`core/src/anatomy.rs`):
 feet are chains ending at the floor, legs climb from them, arms reach

@@ -113,24 +113,52 @@ pub fn talk_view(side_x: f64) -> View {
     View { yaw_deg: if side_x < 0.0 { -TALK_YAW_DEG } else { TALK_YAW_DEG }, pitch_deg: TALK_PITCH_DEG }
 }
 
-/// The talk camera's fit: one centre for both rigs, under the face of the
-/// rest body (`rest`), the scale fixed by the talk camera's distance and
-/// lens, so a body `rest_height` tall shows `talk_visible_m()` of it per
-/// 1.75 m, whatever the pose does.
-pub fn talk_fit(view: &View, rest: &[Vec3], rest_height: f64, cell_h: usize) -> Fit {
+/// The talk camera's fit: one centre for both rigs, under the face, the
+/// scale fixed by the talk camera's distance and lens, so a body
+/// `rest_height` tall shows `talk_visible_m()` of it per 1.75 m, whatever
+/// the pose does. The face is where the pose has carried it (`posed`: the
+/// same vertices as `rest` in this frame), so a frame where the body
+/// leans, lunges or falls is still framed on the face, as the game's talk
+/// camera frames the speaker where they stand.
+pub fn talk_fit(view: &View, rest: &[Vec3], posed: &[Vec3], rest_height: f64, cell_h: usize) -> Fit {
     let floor = rest.iter().map(|p| p.y).fold(f64::MAX, f64::min);
     let k = rest_height.max(1e-9) / owner::BODY_M;
     let head_lo = floor + 0.85 * rest_height;
-    let (mut sx, mut sz, mut n) = (0.0, 0.0, 0usize);
-    for p in rest.iter().filter(|p| p.y >= head_lo) {
-        sx += p.x;
-        sz += p.z;
-        n += 1;
+    let (mut rest_c, mut posed_c, mut n) = (crate::math::v3(0.0, 0.0, 0.0), crate::math::v3(0.0, 0.0, 0.0), 0usize);
+    for (r, p) in rest.iter().zip(posed.iter()) {
+        if r.y >= head_lo {
+            rest_c = rest_c + *r;
+            posed_c = posed_c + *p;
+            n += 1;
+        }
     }
-    let (hx, hz) = if n > 0 { (sx / n as f64, sz / n as f64) } else { (0.0, 0.0) };
-    let aim = crate::math::v3(hx, floor + TALK_FACE_SHARE * rest_height - TALK_AIM_BELOW_M * k, hz);
+    let aim = if n > 0 {
+        let (rc, pc) = (rest_c * (1.0 / n as f64), posed_c * (1.0 / n as f64));
+        // The aim sits as far under the head's middle as it does at rest.
+        let below = rc.y - (floor + TALK_FACE_SHARE * rest_height - TALK_AIM_BELOW_M * k);
+        crate::math::v3(pc.x, pc.y - below, pc.z)
+    } else {
+        crate::math::v3(0.0, floor + TALK_FACE_SHARE * rest_height - TALK_AIM_BELOW_M * k, 0.0)
+    };
     let c = view.to_cam(aim);
     Fit { cx: c.x, cy: c.y, ppu: cell_h as f64 / (talk_visible_m() * k) }
+}
+
+/// How upright a frame is: the posed head's middle above the floor, as a
+/// share of the rest height (about 0.92 standing; a body lying down is
+/// near 0.1).
+pub fn head_share(rest: &[Vec3], posed: &[Vec3]) -> f64 {
+    let floor = rest.iter().map(|p| p.y).fold(f64::MAX, f64::min);
+    let top = rest.iter().map(|p| p.y).fold(f64::MIN, f64::max);
+    let h = (top - floor).max(1e-9);
+    let (mut y, mut n) = (0.0, 0usize);
+    for (r, p) in rest.iter().zip(posed.iter()) {
+        if r.y >= floor + 0.85 * h {
+            y += p.y;
+            n += 1;
+        }
+    }
+    if n == 0 { 0.0 } else { (y / n as f64 - floor) / h }
 }
 
 /// Is a claim inside the talk frame: the mean rest height of its skin
@@ -511,13 +539,20 @@ mod tests {
         // shows the top of the head, not the knees.
         let rest: Vec<Vec3> = (0..=175).map(|i| crate::math::v3(0.0, i as f64 * 0.01, 0.0)).collect();
         let view = talk_view(1.0);
-        let f = talk_fit(&view, &rest, 1.75, 640);
+        let f = talk_fit(&view, &rest, &rest, 1.75, 640);
         let screen_y = |y: f64| 320.0 - (view.to_cam(crate::math::v3(0.0, y, 0.0)).y - f.cy) * f.ppu;
         assert!(screen_y(1.75) > 0.0, "the crown is in the frame");
         assert!(screen_y(0.5) > 640.0, "the knees are under it");
         assert!(in_talk_frame(&rest, &[160, 170]) && !in_talk_frame(&rest, &[20, 50]));
         assert_eq!(talk_view(-0.2).yaw_deg, -TALK_YAW_DEG);
         assert_eq!(Camera::parse("talk"), Some(Camera::Talk));
+        // The same column lying down: the frame follows the face down to it.
+        let lying: Vec<Vec3> = rest.iter().map(|p| crate::math::v3(p.y, 0.1, 0.0)).collect();
+        let fl = talk_fit(&view, &rest, &lying, 1.75, 640);
+        let head = view.to_cam(crate::math::v3(1.70, 0.1, 0.0));
+        let sy = 320.0 - (head.y - fl.cy) * fl.ppu;
+        assert!((0.0..640.0).contains(&sy), "the fallen head stays in the frame: {sy}");
+        assert!(head_share(&rest, &rest) > 0.85 && head_share(&rest, &lying) < 0.2);
     }
 
     #[test]
