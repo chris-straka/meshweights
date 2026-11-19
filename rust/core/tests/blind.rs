@@ -2,7 +2,7 @@
 //! swapped mirrored limb must tear, and a pair sheet must show both
 //! rigs whole at the same frame with only LEFT and RIGHT on it.
 
-use weightforge_core::blind::{BlindSide, cell_image, claim_view, game_fit, pair_sheet, planted_bad};
+use weightforge_core::blind::{BlindSide, GameCamera, cell_image, claim_view, frame_share, game_fit, pair_sheet, planted_bad};
 use weightforge_core::fixtures;
 use weightforge_core::glb::Glb;
 use weightforge_core::metrics::{Ctx, CtxOpts, evaluate};
@@ -46,7 +46,8 @@ fn the_planted_swap_tears_and_the_pair_is_whole_body() {
     }
     let view = claim_view(&bad, pose, &marked);
     let (pg, pb) = (lbs(&m, &ctx.mats[pose], &m.weights), lbs(&m, &ctx.mats[pose], &w));
-    let fit = game_fit(&view, &[&pg, &pb], owner::height(&m), 520, 640);
+    let share = frame_share(GameCamera { distance_m: 3.0, fov_deg: 75.0 });
+    let fit = game_fit(&view, &[&pg, &pb], owner::height(&m), 520, 640, share);
     let sheet =
         pair_sheet(&cell_image(&good, pose, &view, fit, 520, 640, "LEFT"), &cell_image(&bad, pose, &view, fit, 520, 640, "RIGHT"), 1);
     assert_eq!((sheet.w, sheet.h), (1040, 640 + 52));
@@ -64,5 +65,9 @@ fn the_planted_swap_tears_and_the_pair_is_whole_body() {
             }
         }
     }
-    assert!(diff > 2000, "{diff}");
+    // 2000 pixels at the 45 degree camera assumed until 2026-11-19 (a body
+    // 70% of the frame); the game's 75 degrees draws it at 38%, so a share
+    // of the body's pixels is (0.38 / 0.70)^2 of what it was.
+    let k = (share / 0.704).powi(2);
+    assert!(diff as f64 > 2000.0 * k, "{diff} <= {}", 2000.0 * k);
 }

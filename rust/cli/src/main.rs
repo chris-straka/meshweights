@@ -29,7 +29,9 @@ USAGE:
   weights probe   <in.glb> --out <dir> [--poses rom.ron] [--number-from N]
   weights blind   <a.glb> <b.glb> --out <dir> [--motion hero.glb] [--motion-clips ...]
                   [--seed N] [--top N] [--key key.json] [--camera follow|talk] [--through]
-                  (same-frame blind pairs per claim, at the game camera;
+                  (same-frame blind pairs per claim, at the game camera: the
+                  follow camera's lens and distance from the game's own
+                  metrics.ron, $HLH_METRICS or ~/Games/hlh/bevy/assets/data;
                   --through: limbs passing through each other are claims too)
   weights blind-score <dir> --answers answers.json [--key key.json]
                   (lay a judge's answers against tears and the old score)
@@ -93,9 +95,9 @@ COMPARE:
 BLIND:
   One pair per claim: for every failing headline finding of either rig
   (a claim, named by kind and part), both rigs at the frame where the
-  claim is worst, from the game camera (the game's follow camera: 3 m
-  behind the character, a 45-degree lens, the whole body about 70% of
-  the frame; never a close-up of the fault), in the character's paint,
+  claim is worst, from the game camera (the game's follow camera, its
+  distance and lens read from the game's metrics.ron: 3 m and 75 degrees,
+  the whole body about 38% of the frame; never a close-up of the fault), in the character's paint,
   nothing marked and no rig named. The sides are only LEFT and RIGHT;
   which rig is where is flipped by --seed (default 20261115), and the
   pair order is shuffled by it too. Two more pairs keep the judge
@@ -601,6 +603,15 @@ fn cmd_blind(a: &Args) -> ExitCode {
         Some(Some(c)) => c,
         Some(None) => return fail("--camera is follow or talk"),
     };
+    // The follow camera's lens and distance, from the game's own numbers.
+    let share = if camera == wf::blind::Camera::Follow {
+        match wf::blind::game_frame_share() {
+            Ok(s) => s,
+            Err(e) => return fail(e),
+        }
+    } else {
+        0.0
+    };
     let set = match load_poses(a) {
         Ok(s) => s,
         Err(e) => return fail(e),
@@ -853,7 +864,7 @@ fn cmd_blind(a: &Args) -> ExitCode {
         let (view, fit) = match camera {
             wf::blind::Camera::Follow => {
                 let view = wf::blind::claim_view(&vs, p.pose, &marked);
-                let fit = wf::blind::game_fit(&view, &[&pl, &pr], wf::owner::height(ls.model), 520, 640);
+                let fit = wf::blind::game_fit(&view, &[&pl, &pr], wf::owner::height(ls.model), 520, 640, share);
                 (view, fit)
             }
             wf::blind::Camera::Talk => {

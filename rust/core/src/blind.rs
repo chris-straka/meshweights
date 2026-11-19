@@ -16,9 +16,9 @@
 //!   limb's weights swapped left/right. It must look worse, and the
 //!   tears measure must flag it, or the run fails.
 //!
-//! The game camera is the game's follow camera (HLH `fx::follow_camera`:
-//! 3.0 m behind the character, looking at the chest, the default 45
-//! degree lens), so a whole 1.75 m body fills about 70% of the frame
+//! The game camera is the game's follow camera, its distance and lens
+//! read from the game's own metrics.ron (`game_camera`: 3.0 m and a 75
+//! degree view), so a whole 1.75 m body fills about 38% of the frame
 //! height. The heading is whichever follow-camera heading shows the
 //! claim best (the in-game camera orbits as the player turns), but the
 //! distance and framing never close in on the fault: what the judge
@@ -39,17 +39,59 @@ use crate::skin::lbs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The game's follow-camera distance behind the character, metres
-/// (HLH: `fence.distance.unwrap_or(3.0)` in `follow_camera`).
-pub const GAME_CAM_DISTANCE_M: f64 = 3.0;
-/// The game camera's vertical field of view, degrees (Bevy's
-/// `Camera3d::default()` projection, which the game cameras use).
-pub const GAME_CAM_FOV_DEG: f64 = 45.0;
+/// The game's follow camera, as the game itself publishes it: the
+/// `camera` block of HLH's `bevy/assets/data/metrics.ron`, written from
+/// the code that sets it (`metrics::camera_now`; distance behind the point
+/// it looks at, metres, and how tall its view is, degrees). Read from
+/// `$HLH_METRICS`, else `~/Games/hlh/bevy/assets/data/metrics.ron`; no copy
+/// of the numbers is kept here (2026-11-19: a copy said 45 degrees while
+/// the game draws 75, so every blind picture sat 1.6 times too close).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GameCamera {
+    pub distance_m: f64,
+    pub fov_deg: f64,
+}
 
-/// How much of the frame height a 1.75 m body fills at the game
-/// camera: `1.75 / (2 * 3.0 * tan(45deg / 2))`, about 0.70.
-pub fn game_frame_share() -> f64 {
-    owner::BODY_M / (2.0 * GAME_CAM_DISTANCE_M * (GAME_CAM_FOV_DEG * 0.5).to_radians().tan())
+/// The `camera` block of a metrics.ron text (JSON after its `//` lines).
+pub fn parse_game_camera(text: &str) -> Result<GameCamera, String> {
+    let body: String = text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("metrics.ron: {e}"))?;
+    let cam = v.get("camera").ok_or("metrics.ron has no camera block")?;
+    let num = |k: &str| cam.get(k).and_then(|x| x.as_f64()).ok_or(format!("metrics.ron camera has no {k}"));
+    Ok(GameCamera { distance_m: num("distance")?, fov_deg: num("fov")? })
+}
+
+/// Where the game's metrics.ron is.
+pub fn game_metrics_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("HLH_METRICS") {
+        return p.into();
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::Path::new(&home).join("Games/hlh/bevy/assets/data/metrics.ron")
+}
+
+/// The game's follow camera, read once.
+pub fn game_camera() -> Result<GameCamera, String> {
+    static CAM: std::sync::OnceLock<Result<GameCamera, String>> = std::sync::OnceLock::new();
+    CAM.get_or_init(|| {
+        let p = game_metrics_path();
+        let text =
+            std::fs::read_to_string(&p).map_err(|e| format!("the game's camera: cannot read {} ({e}); set HLH_METRICS", p.display()))?;
+        parse_game_camera(&text)
+    })
+    .clone()
+}
+
+/// How much of the frame height a 1.75 m body fills at a camera:
+/// `1.75 / (2 * distance * tan(fov / 2))`.
+pub fn frame_share(cam: GameCamera) -> f64 {
+    owner::BODY_M / (2.0 * cam.distance_m * (cam.fov_deg * 0.5).to_radians().tan())
+}
+
+/// How much of the frame height a 1.75 m body fills at the game's follow
+/// camera (0.38 at the game's 3.0 m and 75 degrees).
+pub fn game_frame_share() -> Result<f64, String> {
+    game_camera().map(frame_share)
 }
 
 /// The game's talk camera, the close shot (HLH `talk::frame`, `Shot::Close`):
@@ -84,7 +126,7 @@ pub fn talk_frame_span() -> (f64, f64) {
 /// Which camera a blind run draws from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Camera {
-    /// HLH's follow camera: the whole body, about 70% of the frame.
+    /// HLH's follow camera: the whole body, about 38% of the frame.
     Follow,
     /// HLH's talk camera, the close shot: head, shoulders and chest.
     Talk,
@@ -219,11 +261,11 @@ pub fn claim_view(side: &BlindSide, pose: usize, marked: &[bool]) -> View {
 
 /// The fit of the game camera for a pair: one centre for both rigs,
 /// the scale fixed by the follow camera's distance and lens, so the
-/// body fills `game_frame_share()` of the frame height whatever the
-/// pose does.
-pub fn game_fit(view: &View, posed: &[&[Vec3]], rest_height: f64, cell_w: usize, cell_h: usize) -> Fit {
+/// body fills `share` (`game_frame_share()`) of the frame height
+/// whatever the pose does.
+pub fn game_fit(view: &View, posed: &[&[Vec3]], rest_height: f64, cell_w: usize, cell_h: usize, share: f64) -> Fit {
     let base = fit(view, posed, cell_w, cell_h);
-    let visible = rest_height.max(1e-9) / game_frame_share();
+    let visible = rest_height.max(1e-9) / share;
     Fit { cx: base.cx, cy: base.cy, ppu: cell_h as f64 / visible }
 }
 
@@ -525,8 +567,12 @@ mod tests {
 
     #[test]
     fn the_game_camera_frames_a_body_like_the_game() {
-        // 1.75 m at 3.0 m through a 45 degree lens fills ~70%.
-        assert!((game_frame_share() - 0.704).abs() < 0.01, "{}", game_frame_share());
+        // The game's own block: 1.75 m at 3.0 m through a 75 degree view fills ~38%.
+        let text = "// header\n{\n \"camera\": {\"distance\": 3.0, \"focus\": 1.535, \"fov\": 75.0}\n}\n";
+        let cam = parse_game_camera(text).unwrap();
+        assert_eq!(cam, GameCamera { distance_m: 3.0, fov_deg: 75.0 });
+        assert!((frame_share(cam) - 0.380).abs() < 0.005, "{}", frame_share(cam));
+        assert!(parse_game_camera("{}").is_err());
     }
 
     #[test]
