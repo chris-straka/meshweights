@@ -397,7 +397,7 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
         let span = (t.head(c[ti]).y - yfoot).max(1e-9);
         let knee = (ti + 1..foot_i)
             .filter(|&i| (t.head(c[i]).y - ymid).abs() < 0.3 * span)
-            .min_by(|&x, &y| (t.head(c[x]).y - ymid).abs().partial_cmp(&(t.head(c[y]).y - ymid).abs()).unwrap());
+            .min_by(|&x, &y| (t.head(c[x]).y - ymid).abs().total_cmp(&(t.head(c[y]).y - ymid).abs()));
         if foot_i > ti {
             a.roles.insert(format!("{prefix_upper}.{side}"), vec![c[ti]]);
             if let Some(k) = knee {
@@ -435,7 +435,7 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
     if legs.len() == 4 {
         // Front pair: ahead along the facing.
         let mut idx: Vec<usize> = (0..4).collect();
-        idx.sort_by(|&x, &y| legs[y].foot_pos.dot(a.forward).partial_cmp(&legs[x].foot_pos.dot(a.forward)).unwrap());
+        idx.sort_by(|&x, &y| legs[y].foot_pos.dot(a.forward).total_cmp(&legs[x].foot_pos.dot(a.forward)));
         let (front, back) = ([idx[0], idx[1]], [idx[2], idx[3]]);
         let chest = t.lca(legs[front[0]].root, legs[front[1]].root);
         let hips = t.lca(legs[back[0]].root, legs[back[1]].root);
@@ -492,7 +492,7 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
         a.body = Body::Legged;
         let centre = legs.iter().map(|l| l.foot_pos).fold(Vec3::ZERO, |s, p| s + p) / legs.len() as f64;
         let mut order: Vec<usize> = (0..legs.len()).collect();
-        order.sort_by(|&x, &y| legs[y].foot_pos.dot(a.forward).partial_cmp(&legs[x].foot_pos.dot(a.forward)).unwrap().then(x.cmp(&y)));
+        order.sort_by(|&x, &y| legs[y].foot_pos.dot(a.forward).total_cmp(&legs[x].foot_pos.dot(a.forward)).then(x.cmp(&y)));
         let mut count: BTreeMap<&str, usize> = BTreeMap::new();
         for &k in &order {
             let l = &legs[k];
@@ -644,7 +644,7 @@ fn humanoid(
             .head(
                 *t.descendants(root)
                     .iter()
-                    .max_by(|&&x, &&y| (t.head(x).dot(left) - mid).abs().partial_cmp(&(t.head(y).dot(left) - mid).abs()).unwrap())
+                    .max_by(|&&x, &&y| (t.head(x).dot(left) - mid).abs().total_cmp(&(t.head(y).dot(left) - mid).abs()))
                     .unwrap(),
             )
             .dot(left)
@@ -668,7 +668,7 @@ fn arm_roles(a: &mut Anatomy, t: &Tree, root: usize, side: &str, left: Vec3, mid
     let far = *t
         .descendants(root)
         .iter()
-        .max_by(|&&x, &&y| (t.head(x) - t.head(root)).len().partial_cmp(&(t.head(y) - t.head(root)).len()).unwrap().then(y.cmp(&x)))
+        .max_by(|&&x, &&y| (t.head(x) - t.head(root)).len().total_cmp(&(t.head(y) - t.head(root)).len()).then(y.cmp(&x)))
         .unwrap();
     let mut p = t.path_up(far, root);
     p.push(root);
@@ -701,9 +701,7 @@ fn arm_roles(a: &mut Anatomy, t: &Tree, root: usize, side: &str, left: Vec3, mid
     let elbow = ui.and_then(|ui| {
         let m = 0.5 * (s[ui] + s[hand_i]);
         let span = (s[hand_i] - s[ui]).max(1e-9);
-        (ui + 1..hand_i)
-            .filter(|&k| (s[k] - m).abs() < 0.3 * span)
-            .min_by(|&x, &y| (s[x] - m).abs().partial_cmp(&(s[y] - m).abs()).unwrap())
+        (ui + 1..hand_i).filter(|&k| (s[k] - m).abs() < 0.3 * span).min_by(|&x, &y| (s[x] - m).abs().total_cmp(&(s[y] - m).abs()))
     });
     let best = ui.zip(elbow);
     a.roles.insert(format!("hand.{side}"), vec![p[hand_i]]);

@@ -148,7 +148,7 @@ fn ray_votes(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) 
                 if list.is_empty() {
                     continue;
                 }
-                list.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+                list.sort_by(|x, y| x.0.total_cmp(&y.0));
                 let cell = |k: usize| {
                     let mut q = [0usize; 3];
                     q[axis] = k;
@@ -537,7 +537,7 @@ pub fn geodesics(model: &Model, res: usize, joints: &[usize]) -> Geo {
             for (j, col) in &cols {
                 list.push((*j, col[v]));
             }
-            list.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
+            list.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
             list.truncate(K);
         });
     }

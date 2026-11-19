@@ -204,7 +204,7 @@ impl Ctx {
             if d.is_empty() {
                 return 0.0;
             }
-            d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            d.sort_by(|a, b| a.total_cmp(b));
             d[d.len() / 2]
         };
         let mut per: Vec<Vec<f64>> = vec![Vec::new(); regions.len()];
@@ -327,7 +327,7 @@ pub fn noise_of(model: &Model, w: &Weights, v: usize) -> f64 {
             + b.iter().filter(|e| weight_of(a, e.0) == 0.0).map(|e| e.1).sum::<f64>()
     };
     let mut d: Vec<f64> = n.iter().map(|&u| l1(&w[v], &w[u as usize])).collect();
-    d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    d.sort_by(|a, b| a.total_cmp(b));
     let median = d[(d.len() - 1) / 2];
     let mut mean: crate::scene::VW = Vec::new();
     let k = n.len() as f64;
@@ -429,7 +429,7 @@ fn invert4(m: [[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
         row[i] = 1.0;
     }
     for col in 0..4 {
-        let piv = (col..4).max_by(|&x, &y| a[x][col].abs().partial_cmp(&a[y][col].abs()).unwrap())?;
+        let piv = (col..4).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
         if a[piv][col].abs() < 1e-18 {
             return None;
         }
@@ -722,7 +722,7 @@ fn evaluate_inner(model: &Model, ctx: &Ctx, w: &Weights, intersect: bool, only: 
         }
         for (r, mut xs) in per.into_iter().enumerate() {
             if !xs.is_empty() {
-                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs.sort_by(|a, b| a.total_cmp(b));
                 radius[r] = xs[xs.len() / 2];
             }
         }
@@ -931,7 +931,8 @@ pub fn intersect_pairs(model: &Model, posed: &[Vec3], sep: f64) -> Vec<(u32, u32
         let hi = p[0].max(p[1]).max(p[2]);
         let (x0, y0, z0) = ((lo.x / cell).floor() as i64, (lo.y / cell).floor() as i64, (lo.z / cell).floor() as i64);
         let (x1, y1, z1) = ((hi.x / cell).floor() as i64, (hi.y / cell).floor() as i64, (hi.z / cell).floor() as i64);
-        if (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 64 {
+        let span = |a: i64, b: i64| b.saturating_sub(a).saturating_add(1);
+        if span(x0, x1).saturating_mul(span(y0, y1)).saturating_mul(span(z0, z1)) > 64 {
             continue; // huge stretched triangle: the stretch metric owns it
         }
         for x in x0..=x1 {

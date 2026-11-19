@@ -459,7 +459,7 @@ pub fn generic(model: &Model) -> Vec<Pose> {
     }
     let mut territory = vec![0usize; sk.joints.len()];
     for p in &model.rest {
-        let j = (0..sk.joints.len()).min_by(|&a, &b| sk.seg_dist(a, *p).partial_cmp(&sk.seg_dist(b, *p)).unwrap()).unwrap_or(0);
+        let j = (0..sk.joints.len()).min_by(|&a, &b| sk.seg_dist(a, *p).total_cmp(&sk.seg_dist(b, *p))).unwrap_or(0);
         territory[j] += 1;
     }
     let min_t = (model.nverts() / 100).max(1);
@@ -533,7 +533,7 @@ fn clip_sample(model: &Model, how: Sampling) -> Vec<(String, Vec<Pose>)> {
             let Ok((_, times)) = glb.read_f64(ia as usize) else { continue };
             let Ok((nc, vals)) = glb.read_f64(oa as usize) else { continue };
             let interp = s.get("interpolation").and_then(Value::as_str).unwrap_or("LINEAR");
-            if times.is_empty() || vals.iter().any(|v| !v.is_finite()) {
+            if times.is_empty() || times.iter().any(|t| !t.is_finite()) || vals.iter().any(|v| !v.is_finite()) {
                 continue;
             }
             // CUBICSPLINE stores (in, value, out) triplets: take the values.

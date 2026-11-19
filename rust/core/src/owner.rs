@@ -266,7 +266,7 @@ fn top_eigenvector(m: [[f64; 4]; 4]) -> [f64; 4] {
             }
         }
     }
-    let best = (0..4).max_by(|&x, &y| a[x][x].partial_cmp(&a[y][y]).unwrap()).unwrap();
+    let best = (0..4).max_by(|&x, &y| a[x][x].total_cmp(&a[y][y])).unwrap();
     [v[0][best], v[1][best], v[2][best], v[3][best]]
 }
 
@@ -773,7 +773,7 @@ pub fn assess(
                     }
                 }
             }
-            let by_whom = pull.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(j, _)| bone_label(model, *j)).unwrap_or_default();
+            let by_whom = pull.iter().max_by(|a, b| a.1.total_cmp(b.1)).map(|(j, _)| bone_label(model, *j)).unwrap_or_default();
             let lab = bone_label(model, b);
             let part = format!("{lab}, {}", side_word(model, &area, b));
             let detail = format!("does not follow the {lab}: held back by the {by_whom}, up to {:.0} cm off", amt * 100.0);
@@ -888,7 +888,7 @@ pub fn assess(
     }
     let tears_area: f64 = (0..nv).filter(|&v| torn[v]).map(|v| varea[v]).sum();
     let tears_verts = torn.iter().filter(|&&t| t).count();
-    findings.sort_by(|a, b| (a.severity != "fail", -a.area_cm2).partial_cmp(&(b.severity != "fail", -b.area_cm2)).unwrap());
+    findings.sort_by(|a, b| (a.severity != "fail").cmp(&(b.severity != "fail")).then_with(|| b.area_cm2.total_cmp(&a.area_cm2)));
     Section {
         name: name.into(),
         frames: ctx.poses.len(),

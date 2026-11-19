@@ -31,7 +31,7 @@ pub struct Glb {
 impl Glb {
     pub fn read_path(path: &std::path::Path) -> Result<Glb> {
         let bytes = std::fs::read(path).map_err(|e| Error(format!("{}: {e}", path.display())))?;
-        Glb::parse(&bytes)
+        Glb::parse(&bytes).map_err(|e| Error(format!("{}: {e}", path.display())))
     }
 
     pub fn parse(b: &[u8]) -> Result<Glb> {
