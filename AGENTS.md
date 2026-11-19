@@ -30,6 +30,12 @@ measured gate numbers: `docs/phase-N.md`.
 - Golden images (`tests/fixtures/golden/`): after an intended render
   change, regenerate with `UPDATE_GOLDENS=1 cargo test --release` and
   look at the PNGs before committing.
+- Behaviour that must not change (clean-ups, splits): `bash bench/fix_golden.sh --check`
+  compares every `weights fix` output on the test mannequins, byte for byte, with the
+  goldens recorded from main (`bench/fix_golden/<os>-<arch>.txt`; Mac and Linux agreed on
+  2026-11-19). Re-record (`--record`) only for an intended change, and say why.
+- Bad input (`rust/cli/tests/robust_input.rs`): a NaN position or bind matrix is exit 2
+  with a message, never a hang or a panic; a result file that can't be written is an error.
 - Threshold changes: rerun the P0 gate (`core/tests/p0_gate.rs`) and update
   the numbers in `docs/phase-0.md`.
 - New CLI flags go in `--help` and the README.
