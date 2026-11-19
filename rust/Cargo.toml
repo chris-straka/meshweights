@@ -13,7 +13,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 ron = "0.12"
 png = "0.18"
 rayon = "1"
-glbkit = { git = "https://github.com/chris-straka/rfcheck.git", rev = "d3262aad646d92a1308ce171fe48cc901da57fba" }
+glbkit = { git = "https://github.com/chris-straka/rfcheck.git", rev = "86abd1e89fdacba39f330b79e4a9201918eafece" }
 
 [profile.release]
 debug = false

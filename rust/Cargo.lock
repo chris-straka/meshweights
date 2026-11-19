@@ -92,7 +92,7 @@ dependencies = [
 [[package]]
 name = "glbkit"
 version = "0.1.0"
-source = "git+https://github.com/chris-straka/rfcheck.git?rev=d3262aad646d92a1308ce171fe48cc901da57fba#d3262aad646d92a1308ce171fe48cc901da57fba"
+source = "git+https://github.com/chris-straka/rfcheck.git?rev=86abd1e89fdacba39f330b79e4a9201918eafece#86abd1e89fdacba39f330b79e4a9201918eafece"
 
 [[package]]
 name = "hashbrown"
