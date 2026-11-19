@@ -1,8 +1,12 @@
-# weightforge — build plan
+# meshweights — build plan
 
 Automatic skin-weight QA and repair for game-bound characters. Written
-2026-10-04 for the games' asset pipeline (`~/Games/_tools/asset-pipeline.md`)
-and genforge's `gen character` chain (`~/Games/_media/assetgen/PLAN.md` P7).
+2026-10-04 for the games' asset pipeline (`~/Games/_tools/asset-pipeline.md`).
+The weight gate runs in the two rig routes: motion's `tools/tripo_rig.py`
+(people: `weights fix`, then `weights check`) and skintokens'
+`tools/creature_route.py` (creatures). assetgen (`gen`, formerly genforge;
+`~/Games/_media/assetgen/PLAN.md` P7) still calls the weights adapter in its
+character chain, though it is not where the routes run.
 
 ## Why
 
@@ -19,7 +23,7 @@ measures what breaks, fixes it, and proves the fix with numbers and pictures.
 weights check  hero.glb [--poses rom.ron] [--json]   # score deformation, list bad regions
 weights sheet  hero.glb --out sheet.png              # range-of-motion pose sheet, bad verts in red
 weights fix    hero.glb --out fixed.glb [--method auto|smooth|geodesic|transfer|optimize]
-weights compare a.glb b.glb --out ab.png             # same poses side by side, for the inbox
+weights compare a.glb b.glb --out ab.png             # same poses side by side, for a blind pair or the chat
 ```
 
 `fix --method auto` builds several weight candidates, measures each on sets
@@ -97,8 +101,8 @@ worse than what came in.
 | P1 | `sheet`: ROM pose sheet with red bad-vertex overlay; `compare` A/B sheet | Golden images on the fixture mannequin; sheet readable on a phone (checked by eye) |
 | P2 | `fix` methods 1-2 (clean-up, geodesic voxel binding) + per-region picking and seam blending | On fixtures: weight error vs ground truth drops ≥80%; deformation score better on every faulted region; output passes rfcheck |
 | P3 | Methods 3-4 (transfer + inpaint, optimization) | Beats P2 on the 10 worst regions of the real test set |
-| P4 | Real assets: 10+ Tripo-rigged characters (humanoid + creature) from genforge, SkinTokens candidate | Report per asset; the owner judges before/after sheets in the inbox; ≥8/10 rated better or equal |
-| P5 | Blender extension + `gen character` hook (genforge P7 calls `weights check`, then `fix` on failure) | One end-to-end genforge run: Tripo rig fails check → fixed → passes → inbox |
+| P4 | Real assets: 10+ Tripo-rigged characters (humanoid + creature) from genforge, SkinTokens candidate | Report per asset; judged in blind picture pairs at the game camera ([`docs/blind.md`](docs/blind.md)), and the owner sees before/after pictures in the chat when a call is theirs; ≥8/10 rated better or equal |
+| P5 | Blender extension + rig-route weight gate (motion's `tools/tripo_rig.py` for people, skintokens' `tools/creature_route.py` for creatures; assetgen P7's character chain also calls the weights adapter: `weights check`, then `fix` on failure) | One end-to-end route run: Tripo rig fails check → fixed → passes, with sheets for a blind pair or the chat |
 
 ## Rules
 

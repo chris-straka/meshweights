@@ -32,7 +32,7 @@ F (54k verts, 44 bones, 252 poses) took 34 s; 12 s since incremental trial scori
 
 To finish P4: generate 10+ Tripo-rigged characters with genforge, drop
 them in `bench/models/` (UniRig outputs in a candidates folder), run
-`bench/run.py --candidates <dir>`, send the A/B sheets to the inbox.
+`bench/run.py --candidates <dir>`, and show the A/B sheets in the chat.
 
 ## 2026-11-16 — 10 generated cast rigs (`SkinTokens` + `weights fix --motion`)
 
@@ -64,5 +64,5 @@ range-of-motion poses, plus blind same-frame game-camera judging via
   before ranking by `tears` then `score` eliminated the `2.0–3.4x` flat
   hem/crotch bridges that unconstrained tear overrides produced (blind
   head-to-head `ver_06b`: cap-guarded `fix` won 5/6 claims, gates passed).
-- Owner inbox sign-off on the cast's before/after sheets remains the
-  owner's call.
+- The owner's sign-off in the chat on the cast's before/after sheets
+  remains the owner's call.
