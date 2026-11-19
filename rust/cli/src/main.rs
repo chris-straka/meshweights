@@ -479,7 +479,10 @@ fn cmd_show(a: &Args) -> ExitCode {
         println!("{}", path.display());
         index.push(serde_json::json!({"file": path.file_name().unwrap().to_string_lossy(), "section": sec, "finding": f}));
     }
-    let _ = std::fs::write(dir.join("findings.json"), serde_json::to_string_pretty(&index).unwrap());
+    let findings_path = dir.join("findings.json");
+    if let Err(e) = std::fs::write(&findings_path, serde_json::to_string_pretty(&index).unwrap()) {
+        return fail(format!("{}: {e}", findings_path.display()));
+    }
     ExitCode::SUCCESS
 }
 
@@ -569,7 +572,10 @@ fn cmd_before_after(a: &Args) -> ExitCode {
         println!("{}  before {:.0} cm2, after {left:.0} cm2", path.display(), f.area_cm2);
         index.push(serde_json::json!({"file": path.file_name().unwrap().to_string_lossy(), "finding": f, "after_cm2": left}));
     }
-    let _ = std::fs::write(dir.join("before_after.json"), serde_json::to_string_pretty(&index).unwrap());
+    let ba_path = dir.join("before_after.json");
+    if let Err(e) = std::fs::write(&ba_path, serde_json::to_string_pretty(&index).unwrap()) {
+        return fail(format!("{}: {e}", ba_path.display()));
+    }
     ExitCode::SUCCESS
 }
 
@@ -1009,7 +1015,9 @@ fn cmd_blind_score(a: &Args) -> ExitCode {
         if v.planted_ok && v.planted_tears_ok { "ok" } else { "FAILED" }
     );
     let out = dir.join("verdict.json");
-    let _ = std::fs::write(&out, serde_json::to_string_pretty(&v).unwrap());
+    if let Err(e) = std::fs::write(&out, serde_json::to_string_pretty(&v).unwrap()) {
+        return fail(format!("{}: {e}", out.display()));
+    }
     println!("{}", out.display());
     if v.pass { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }

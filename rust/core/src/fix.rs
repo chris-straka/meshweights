@@ -439,7 +439,7 @@ pub fn cleanup(model: &Model, ctx: &Ctx, ev: &Eval, smooth_tears: bool) -> Weigh
                 .iter()
                 .map(|&j| {
                     let mut xs: Vec<f64> = n.iter().map(|&u| weight_of(&w[u as usize], j)).collect();
-                    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    xs.sort_by(|a, b| a.total_cmp(b));
                     let k = xs.len();
                     (j, if k % 2 == 1 { xs[k / 2] } else { 0.5 * (xs[k / 2 - 1] + xs[k / 2]) })
                 })
@@ -457,7 +457,7 @@ pub fn cleanup(model: &Model, ctx: &Ctx, ev: &Eval, smooth_tears: bool) -> Weigh
         if order.is_empty() {
             break;
         }
-        order.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
+        order.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         for (_, v) in order {
             let med = median_of(&w, v);
             if !med.is_empty() && l1(&w[v], &med) > thr {
@@ -496,7 +496,7 @@ pub fn geodesic(model: &Model, ctx: &Ctx) -> Weights {
                 // Unreachable through the voxels: nearest bone segment.
                 let j = (0..model.njoints())
                     .filter(|&j| deform[j])
-                    .min_by(|&a, &b| model.skel.seg_dist(a, model.rest[v]).partial_cmp(&model.skel.seg_dist(b, model.rest[v])).unwrap())
+                    .min_by(|&a, &b| model.skel.seg_dist(a, model.rest[v]).total_cmp(&model.skel.seg_dist(b, model.rest[v])))
                     .unwrap_or(0);
                 vw.push((j as u32, 1.0));
             }
@@ -534,7 +534,7 @@ pub fn joint_bands(model: &Model, ctx: &Ctx) -> Weights {
             if d.is_empty() {
                 return 0.0;
             }
-            d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            d.sort_by(|a, b| a.total_cmp(b));
             d[d.len() / 2]
         })
         .collect();
@@ -575,7 +575,7 @@ pub fn joint_bands(model: &Model, ctx: &Ctx) -> Weights {
                 .iter()
                 .copied()
                 .filter(|&c| deform[c] && connected(c) == Some(j))
-                .min_by(|&a, &b| (sk.head[a] - x).len().partial_cmp(&(sk.head[b] - x).len()).unwrap().then(a.cmp(&b)));
+                .min_by(|&a, &b| (sk.head[a] - x).len().total_cmp(&(sk.head[b] - x).len()).then(a.cmp(&b)));
             if let Some(c) = child {
                 let bw = radius[j].max(radius[c]).max(1e-6);
                 let cdir = (sk.tail[c] - sk.head[c]).normalized();
@@ -814,9 +814,8 @@ pub fn map_joints(src: &Model, dst: &Model) -> Vec<Option<u32>> {
                 }
             }
             let h = src.skel.head[j];
-            let (best, d) = (0..dst.njoints())
-                .map(|t| (t, (dst.skel.head[t] - h).len()))
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)))?;
+            let (best, d) =
+                (0..dst.njoints()).map(|t| (t, (dst.skel.head[t] - h).len())).min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))?;
             (d <= 0.05 * dst.scale).then_some(best as u32)
         })
         .collect();
@@ -862,7 +861,7 @@ pub fn transfer(model: &Model, ctx: &Ctx, source: Option<&Model>, match_dist: f6
 /// Euclidean projection of v onto the probability simplex.
 fn project_simplex(v: &mut [f64]) {
     let mut u: Vec<f64> = v.to_vec();
-    u.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    u.sort_by(|a, b| b.total_cmp(a));
     let mut css = 0.0;
     let mut theta = 0.0;
     for (i, &ui) in u.iter().enumerate() {
@@ -1405,7 +1404,7 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     // Search order: outward from the worst failing region along region
     // adjacency, so moves that conflict are decided next to each other.
     let mut by_e: Vec<usize> = (0..nr).filter(|&r| failing[r]).collect();
-    by_e.sort_by(|&a, &b| orig_e[b].partial_cmp(&orig_e[a]).unwrap().then(a.cmp(&b)));
+    by_e.sort_by(|&a, &b| orig_e[b].total_cmp(&orig_e[a]).then(a.cmp(&b)));
     let mut anchors: Vec<usize> = Vec::new();
     let mut seen = vec![false; nr];
     for &start in &by_e {

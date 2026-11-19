@@ -254,7 +254,7 @@ pub fn build(file: &str, model: &Model, ctx: &Ctx, ev: &Eval) -> Report {
         });
     }
     findings.sort_by(|a, b| (a.severity != "fail", &a.region, &a.code).cmp(&(b.severity != "fail", &b.region, &b.code)));
-    regions.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap().then(a.name.cmp(&b.name)));
+    regions.sort_by(|a, b| a.score.total_cmp(&b.score).then(a.name.cmp(&b.name)));
     // Half the vertex mean, half the worst region: one broken limb or piece
     // must pull the score down even on a big mesh.
     let mean_e: f64 = ev.energy.iter().sum::<f64>() / model.nverts().max(1) as f64;

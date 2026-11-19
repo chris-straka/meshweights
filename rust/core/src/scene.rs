@@ -213,7 +213,8 @@ pub struct SkinInfo {
 
 /// Reads every skin. Joints are merged by node in file order (skin 0's
 /// first), so a one-skin file keeps its joint indices.
-fn read_skins(glb: &Glb, nnodes: usize) -> Result<(Vec<usize>, Vec<Mat4>, Vec<SkinInfo>)> {
+fn read_skins(glb: &Glb, nodes: &[Node]) -> Result<(Vec<usize>, Vec<Mat4>, Vec<SkinInfo>)> {
+    let nnodes = nodes.len();
     let mut joints: Vec<usize> = Vec::new();
     let mut ibm: Vec<Mat4> = Vec::new();
     let mut of_node: BTreeMap<usize, u32> = BTreeMap::new();
@@ -235,6 +236,12 @@ fn read_skins(glb: &Glb, nnodes: usize) -> Result<(Vec<usize>, Vec<Mat4>, Vec<Sk
                 let (n, v) = glb.read_f64(a as usize)?;
                 if n != 16 || v.len() / 16 < local.len() {
                     return err(format!("skin {si}: inverseBindMatrices accessor malformed"));
+                }
+                for (ji, chunk) in v.chunks(16).take(local.len()).enumerate() {
+                    if let Some(&bad) = chunk.iter().find(|x| !x.is_finite()) {
+                        let jn = &nodes[local[ji]].name;
+                        return err(format!("skin {si} joint {ji} '{jn}': inverse bind matrix is not finite ({bad})"));
+                    }
                 }
                 v.chunks(16).take(local.len()).map(Mat4::from_cols_slice).collect()
             }
@@ -259,6 +266,12 @@ fn read_skins(glb: &Glb, nnodes: usize) -> Result<(Vec<usize>, Vec<Mat4>, Vec<Sk
 
 impl Skeleton {
     fn build(glb: &Glb, nodes: Vec<Node>, joints: Vec<usize>, ibm: Vec<Mat4>) -> Result<Skeleton> {
+        for (ni, nd) in nodes.iter().enumerate() {
+            let vals = [nd.t.x, nd.t.y, nd.t.z, nd.r.x, nd.r.y, nd.r.z, nd.r.w, nd.s.x, nd.s.y, nd.s.z];
+            if let Some(bad) = vals.into_iter().chain(nd.local().m.into_iter().flatten()).find(|x| !x.is_finite()) {
+                return err(format!("node {ni} '{}': transform is not finite ({bad})", nd.name));
+            }
+        }
         let order = topo_order(&nodes);
         let names: Vec<String> = joints.iter().map(|&j| nodes[j].name.clone()).collect();
         let mut node_to_joint = vec![usize::MAX; nodes.len()];
@@ -290,6 +303,11 @@ impl Skeleton {
             }
         }
         let rest_global = globals(&nodes, &order);
+        for (ni, g) in rest_global.iter().enumerate() {
+            if let Some(&bad) = g.m.iter().flatten().find(|x| !x.is_finite()) {
+                return err(format!("node {ni} '{}': transform is not finite ({bad})", nodes[ni].name));
+            }
+        }
         let n_joints = joints.len();
         let head: Vec<Vec3> = joints.iter().map(|&n| rest_global[n].translation()).collect();
         let helpers = crate::helpers::detect(glb.arr("nodes"), &nodes, &joints, &names);
@@ -345,7 +363,7 @@ impl Skeleton {
                 .iter()
                 .copied()
                 .filter(|&c| d(c).normalized().dot(yaxis[j]) > 0.98)
-                .min_by(|&a, &b| d(a).len().partial_cmp(&d(b).len()).unwrap().then(a.cmp(&b)));
+                .min_by(|&a, &b| d(a).len().total_cmp(&d(b).len()).then(a.cmp(&b)));
             let pick = match along_y {
                 Some(c) => {
                     on_y[j] = true;
@@ -360,7 +378,7 @@ impl Skeleton {
                         None => Vec3::ZERO,
                     };
                     let key = |c: usize| d(c).dot(dir) + 1e-3 * d(c).len();
-                    ch.iter().copied().max_by(|&a, &b| key(a).partial_cmp(&key(b)).unwrap().then(b.cmp(&a))).unwrap()
+                    ch.iter().copied().max_by(|&a, &b| key(a).total_cmp(&key(b)).then(b.cmp(&a))).unwrap()
                 }
             };
             tails[j] = self.head[pick];
@@ -443,7 +461,7 @@ impl Skeleton {
                 if r.len() < 4 {
                     return None;
                 }
-                r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                r.sort_by(|a, b| a.total_cmp(b));
                 Some(r[(r.len() * 95 / 100).min(r.len() - 1)])
             })
             .collect();
@@ -486,7 +504,7 @@ impl Skeleton {
                 .filter(|&k| in_sub[k] != r)
                 .filter_map(|k| on_ray(r, k).map(|c| (k, c - if shared.contains(&(r.min(k) as u32, r.max(k) as u32)) { 0.2 } else { 0.0 })))
                 .filter(|x| x.1 < 0.05)
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         }
         for &r in &roots {
             // Walk the orphan roots' links; a walk back to r is a loop.
@@ -499,7 +517,7 @@ impl Skeleton {
                 }
                 if seen.contains(&next) {
                     if next == r {
-                        let worst = *seen.iter().max_by(|&&a, &&b| link[a].unwrap().1.partial_cmp(&link[b].unwrap().1).unwrap()).unwrap();
+                        let worst = *seen.iter().max_by(|&&a, &&b| link[a].unwrap().1.total_cmp(&link[b].unwrap().1)).unwrap();
                         link[worst] = None;
                     }
                     break;
@@ -524,7 +542,7 @@ impl Skeleton {
         let lowest = |side: f64| {
             (0..n)
                 .filter(|&j| weighted[j] && (self.head[j].x - cx) * side > 0.01 * extent)
-                .min_by(|&a, &b| self.head[a].y.partial_cmp(&self.head[b].y).unwrap().then(a.cmp(&b)))
+                .min_by(|&a, &b| self.head[a].y.total_cmp(&self.head[b].y).then(a.cmp(&b)))
         };
         let hips_at = match (lowest(1.0), lowest(-1.0)) {
             (Some(a), Some(b)) => (self.head[top_of(a)] + self.head[top_of(b)]) * 0.5,
@@ -536,7 +554,7 @@ impl Skeleton {
             .iter()
             .copied()
             .filter(|&r| subs[r].iter().any(|&j| weighted[j]))
-            .min_by(|&a, &b| (self.head[a] - hips_at).len().partial_cmp(&(self.head[b] - hips_at).len()).unwrap().then(a.cmp(&b)))
+            .min_by(|&a, &b| (self.head[a] - hips_at).len().total_cmp(&(self.head[b] - hips_at).len()).then(a.cmp(&b)))
             .unwrap_or(roots[0]);
         let mut links: Vec<(usize, usize)> = roots.iter().filter_map(|&r| link[r].map(|x| (r, x.0))).collect();
         // Members of each top's unit (its subtree plus certain chains).
@@ -571,8 +589,7 @@ impl Skeleton {
         };
         join(main, &mut in_tree, &mut best, &pending);
         while !pending.is_empty() {
-            let (li, &r) =
-                pending.iter().enumerate().min_by(|a, b| best[*a.1].0.partial_cmp(&best[*b.1].0).unwrap().then(a.1.cmp(b.1))).unwrap();
+            let (li, &r) = pending.iter().enumerate().min_by(|a, b| best[*a.1].0.total_cmp(&best[*b.1].0).then(a.1.cmp(b.1))).unwrap();
             pending.swap_remove(li);
             links.push((r, best[r].1));
             join(r, &mut in_tree, &mut best, &pending);
@@ -718,12 +735,13 @@ pub fn weight_of(vw: &VW, j: u32) -> f64 {
 
 impl Model {
     pub fn load(path: &std::path::Path) -> Result<Model> {
-        Model::from_glb(Glb::read_path(path)?)
+        let glb = Glb::read_path(path)?;
+        Model::from_glb(glb).map_err(|e| crate::glb::Error(format!("{}: {e}", path.display())))
     }
 
     pub fn from_glb(glb: Glb) -> Result<Model> {
         let nodes = parse_nodes(&glb);
-        let (joint_nodes, ibm, skins) = read_skins(&glb, nodes.len())?;
+        let (joint_nodes, ibm, skins) = read_skins(&glb, &nodes)?;
         let mut skel = Skeleton::build(&glb, nodes, joint_nodes, ibm)?;
         let mut node_joint = vec![None; skel.nodes.len()];
         for (j, &n) in skel.joints.iter().enumerate() {
@@ -736,6 +754,14 @@ impl Model {
             .iter()
             .map(|k| k.joints.iter().zip(&k.ibm).map(|(&j, m)| skel.rest_global[skel.joints[j as usize]] * *m).collect())
             .collect();
+        for (k, s) in skin_s.iter().enumerate() {
+            for (ji, m) in s.iter().enumerate() {
+                if let Some(&bad) = m.m.iter().flatten().find(|x| !x.is_finite()) {
+                    let jn = &skel.names[skins[k].joints[ji] as usize];
+                    return err(format!("skin {} joint {ji} '{jn}': bind matrix is not finite ({bad})", skins[k].index));
+                }
+            }
+        }
         let skin_uniform: Vec<bool> = skin_s
             .iter()
             .map(|s| s.iter().all(|m| m.m.iter().flatten().zip(s[0].m.iter().flatten()).all(|(a, b)| (a - b).abs() < 1e-4)))
@@ -811,7 +837,8 @@ impl Model {
                     hi = hi.max(vec3_of(acc.get("max"), hi));
                 }
             }
-            let step = if hi.x >= lo.x { ((hi - lo).len() * 1e-6).max(1e-9) } else { 1e-6 };
+            let ext = (hi - lo).len();
+            let step = if hi.x >= lo.x && ext.is_finite() { (ext * 1e-6).max(1e-9) } else { 1e-6 };
             let snj = skin.map(|k| skins[k].joints.len()).unwrap_or(0);
             for (pi, p) in prim_list.iter().enumerate() {
                 let attrs = p.get("attributes");
@@ -835,6 +862,15 @@ impl Model {
                     continue; // points and lines have no surface to check
                 }
                 let pos = glb.read_vec3(pos_a as usize)?;
+                for (vi, p3) in pos.iter().enumerate() {
+                    if let Some(&bad) = p3.iter().find(|x| !x.is_finite()) {
+                        let mn = &parts[part].name;
+                        if prim_list.len() > 1 {
+                            return err(format!("mesh '{mn}' prim {pi} vertex {vi}: position is not finite ({bad})"));
+                        }
+                        return err(format!("mesh '{mn}' vertex {vi}: position is not finite ({bad})"));
+                    }
+                }
                 let raw_rows = if sets.len() == 1 {
                     let (_, jv) = glb.read_f64(sets[0].0)?;
                     let (_, wv) = glb.read_f64(sets[0].1)?;
@@ -953,6 +989,12 @@ impl Model {
                     }
                     acc
                 };
+            }
+        }
+        for (v, p) in rest.iter().enumerate() {
+            if let Some(bad) = [p.x, p.y, p.z].into_iter().find(|x| !x.is_finite()) {
+                let mn = &parts[vpart[v] as usize].name;
+                return err(format!("mesh '{mn}' vertex {v}: position is not finite ({bad})"));
             }
         }
         let weights: Weights = local_w
