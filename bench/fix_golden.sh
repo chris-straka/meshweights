@@ -7,8 +7,8 @@
 #   bench/fix_golden.sh --check     compare with bench/fix_golden/<os>-<arch>.txt (the default)
 #   bench/fix_golden.sh --record    write that file (only from a main the outputs are right on)
 #
-# Floats differ in the last bit between macOS arm64 and Linux x86_64, so each platform has its
-# own file; a platform with none fails. Builds `weights` (release) unless WEIGHTS_BIN is set.
+# Each platform may have its own file (floats can differ in the last bit between machines); one
+# without is held to all.txt, the outputs every recorded platform agreed on. Builds `weights` (release) unless WEIGHTS_BIN is set.
 # Prints PASS/FAIL per case and ends with GOLDEN PASS or GOLDEN FAIL; exit 0 only on a pass.
 set -u
 cd "$(dirname "$0")/.." || exit 2
@@ -50,7 +50,13 @@ if [ "$mode" = --record ]; then
   echo "recorded $(wc -l < now.txt | tr -d ' ') lines in bench/fix_golden/$plat.txt"
   exit 0
 fi
-if [ ! -f "$golden" ]; then echo "FAIL  no golden for $plat (bench/fix_golden/$plat.txt)"; echo "GOLDEN FAIL"; exit 1; fi
+# A platform with no file of its own is held to the one every recorded platform agreed on
+# (all.txt: macOS arm64 and Linux x86_64 gave byte-identical outputs on 2026-11-19).
+if [ ! -f "$golden" ]; then
+  echo "no golden of its own for $plat: using bench/fix_golden/all.txt"
+  golden="$(dirname "$golden")/all.txt"
+fi
+if [ ! -f "$golden" ]; then echo "FAIL  no golden for $plat"; echo "GOLDEN FAIL"; exit 1; fi
 fails=0
 while IFS= read -r line; do
   if grep -qxF -- "$line" now.txt; then echo "PASS  $line"; else
