@@ -46,6 +46,7 @@ echo "== build"
 command -v cargo >/dev/null 2>&1 || { fail "no cargo"; echo "GATE FAIL ($FAILS)"; exit 1; }
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/rust/target}/gate-$(git rev-parse --short=12 HEAD)-$$"
 trap 'rm -rf "$T" "$CARGO_TARGET_DIR" rust/core/tests/zz_fix_paths_probe.rs' EXIT
+if (cd rust && cargo fmt --all --check) > "$T/fmt" 2>&1; then pass "cargo fmt --all --check"; else fail "cargo fmt --all --check"; show 8 < "$T/fmt"; fi
 # The probe: every pub item of the base's fix.rs, named by path.
 python3 - "$T/base_fix.rs" > rust/core/tests/zz_fix_paths_probe.rs <<'PY'
 import re, sys
@@ -56,7 +57,6 @@ print("#[allow(unused_imports)]")
 print("use weightforge_core::fix::{" + ", ".join(names) + "};")
 print("#[test]\nfn zz_fix_paths_probe() {}")
 PY
-if (cd rust && cargo fmt --all --check) > "$T/fmt" 2>&1; then pass "cargo fmt --all --check"; else fail "cargo fmt --all --check"; show 8 < "$T/fmt"; fi
 (cd rust && cargo build --release --all-targets) > "$T/build" 2>&1
 bc=$?; nw=$(grep -cE '^warning' "$T/build")
 if [ $bc -eq 0 ] && [ "$nw" -eq 0 ]; then pass "release build of every target, zero warnings; every pub item of fix.rs still at weightforge_core::fix"; else fail "build: exit $bc, $nw warnings"; grep -E '^(warning|error)' -A4 "$T/build" | show 20; fi
