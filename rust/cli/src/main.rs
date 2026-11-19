@@ -28,8 +28,9 @@ USAGE:
                   [--poses-b rom_b.ron]
   weights probe   <in.glb> --out <dir> [--poses rom.ron] [--number-from N]
   weights blind   <a.glb> <b.glb> --out <dir> [--motion hero.glb] [--motion-clips ...]
-                  [--seed N] [--top N] [--key key.json] [--camera follow|talk]
-                  (same-frame blind pairs per claim, at the game camera)
+                  [--seed N] [--top N] [--key key.json] [--camera follow|talk] [--through]
+                  (same-frame blind pairs per claim, at the game camera;
+                  --through: limbs passing through each other are claims too)
   weights blind-score <dir> --answers answers.json [--key key.json]
                   (lay a judge's answers against tears and the old score)
   weights closeness <pro.glb> <test.glb> [--motion hero.glb] [--json]
@@ -651,8 +652,11 @@ fn cmd_blind(a: &Args) -> ExitCode {
         area: f64,
     }
     let mut claims: Vec<Claim> = Vec::new();
+    // --through: a limb passing through another is a claim too (left out
+    // by default: its skin is counted apart from the tears, as pokes).
+    let through = a.has("--through");
     for (src, sec, other_ctx) in [(0usize, seca, ctxb), (1usize, secb, ctxa)] {
-        for f in sec.findings.iter().filter(|f| f.severity == "fail" && f.kind != "limb_through") {
+        for f in sec.findings.iter().filter(|f| f.severity == "fail" && (through || f.kind != "limb_through")) {
             if kinds.as_ref().is_some_and(|k| !k.contains(&f.kind)) || f.worst_pose >= other_ctx.poses.len() {
                 continue;
             }
@@ -1468,7 +1472,7 @@ fn flags_of(cmd: &str) -> Option<Vec<&'static str>> {
         "check" => &["--json", "--vertex-json", "--motion", "--motion-clips"],
         "sheet" => &["--out", "--cols"],
         "probe" => &["--out", "--number-from"],
-        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key", "--camera"],
+        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key", "--camera", "--through"],
         "blind-score" => &["--answers", "--key"],
         "show" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
         "before-after" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
