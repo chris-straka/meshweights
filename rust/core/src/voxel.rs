@@ -1,19 +1,17 @@
 //! Geodesic distance from each bone to each vertex, measured through a
-//! voxelization of the mesh (Dionne & de Lasa 2013, "Geodesic Voxel
-//! Binding for Production Character Meshes"). Paths stay inside the body,
-//! so a hand hanging next to a thigh is far from the thigh bone even though
-//! it is close in a straight line. Works on multi-shell, non-manifold,
-//! self-intersecting meshes because it only rasterizes triangles.
+//! cut-cell geodesic graph of the mesh (extending Dionne & de Lasa 2013 with
+//! exact surface-cut grid edges so narrow sub-voxel air gaps never bridge).
 //!
-//! The inside is what a flood from outside cannot reach, plus what a vote
-//! of rays calls inside: generated meshes keep small openings, and one is
-//! enough for the flood to fill the whole body, leaving only the shell
-//! solid (a bone's distance then became a walk along the skin from one
-//! seed). Six half-rays along the axes reach each voxel from outside the
-//! grid; one says "inside" when it crossed some shell an odd number of
-//! times. A small hole fools only the rays that pass through it, so four
-//! of six decide. Shells count apart, so overlapping shells (an arm tube
-//! through the torso) and flipped faces stay right.
+//! Six half-rays along the grid axes classify strictly interior grid nodes
+//! (`votes >= 4`, surviving small mesh openings) and record exact ray-triangle
+//! intervals per shell along every axis edge. Axis edges stay open across
+//! overlapping closed shells (where union parity stays `> 0`) and are cut
+//! whenever the segment exits into air (even a sub-voxel gap on a single
+//! watertight shell). Diagonal edges stay open where locally connected by
+//! axis edges and free of triangle intersections, preserving 26-connected
+//! angular accuracy without cutting corners across air gaps. Surface vertices
+//! attach only to unobstructed interior nodes and stay linked along mesh
+//! edges so thin parts narrower than a voxel remain reachable.
 
 use crate::math::{Vec3, segment_distance, v3};
 use crate::scene::Model;
@@ -21,6 +19,11 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+
+/// Small deterministic grid-coordinate jitter shared by all three axis ray
+/// families so every `(x, y, z)` node sits at one exact 3D point off any
+/// grid-aligned triangle edge or vertex.
+const RAY_EPS: [f64; 3] = [0.001_371_9, 0.002_917_3, 0.004_193_7];
 
 pub struct Grid {
     pub n: [usize; 3],
@@ -57,6 +60,11 @@ impl Grid {
     }
 }
 
+#[inline]
+fn node_pos(g: &Grid, x: usize, y: usize, z: usize) -> Vec3 {
+    g.origin + v3(x as f64 + 0.5 + RAY_EPS[0], y as f64 + 0.5 + RAY_EPS[1], z as f64 + 0.5 + RAY_EPS[2]) * g.h
+}
+
 /// How sealed the body is, from the voxel fill (`voxelize`).
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Solid {
@@ -78,11 +86,9 @@ pub struct Solid {
 /// More of the inside than this contested and the fill is not trusted.
 pub const MAX_CONTESTED: f64 = 0.05;
 
-/// Six-ray inside votes per voxel (see the module docs). `use_tri` picks
-/// the triangles that count.
-fn ray_votes(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) -> bool) -> Vec<u8> {
-    // Shells: connected components over shared vertices.
-    let mut parent: Vec<u32> = (0..pos.len() as u32).collect();
+/// Connected component ID per triangle over shared vertices.
+fn tri_shells(nverts: usize, tris: &[[u32; 3]]) -> Vec<u32> {
+    let mut parent: Vec<u32> = (0..nverts as u32).collect();
     fn find(p: &mut [u32], mut x: u32) -> u32 {
         while p[x as usize] != x {
             p[x as usize] = p[p[x as usize] as usize];
@@ -99,23 +105,65 @@ fn ray_votes(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) 
             }
         }
     }
-    let shell: Vec<u32> = tris.iter().map(|t| find(&mut parent, t[0])).collect();
-    let mut votes = vec![0u8; g.cell.len()];
+    tris.iter().map(|t| find(&mut parent, t[0])).collect()
+}
+
+/// Watertight 2D point-in-triangle test along one projection axis using
+/// canonical vertex-index edge ordering so shared edges never leak or double-hit.
+#[inline]
+fn ray_tri_2d(t: [u32; 3], a: (f64, f64), b: (f64, f64), c: (f64, f64), d0: f64, d1: f64, d2: f64, p: (f64, f64)) -> Option<f64> {
+    let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+    if area.abs() < 1e-14 {
+        return None;
+    }
+    let pos_area = area > 0.0;
+    let edge = |vi: u32, vj: u32, pa: (f64, f64), pb: (f64, f64)| -> Option<f64> {
+        let (s, e, flipped) = if vi < vj { (pa, pb, false) } else { (pb, pa, true) };
+        let ec = (e.0 - s.0) * (p.1 - s.1) - (e.1 - s.1) * (p.0 - s.0);
+        let want_ge = pos_area != flipped;
+        let ok = if want_ge { ec >= 0.0 } else { ec < 0.0 };
+        ok.then_some(if flipped { -ec } else { ec })
+    };
+    let ed0 = edge(t[0], t[1], a, b)?;
+    let ed1 = edge(t[1], t[2], b, c)?;
+    let ed2 = edge(t[2], t[0], c, a)?;
+    Some((ed1 * d0 + ed2 * d1 + ed0 * d2) / area)
+}
+
+struct RayData {
+    /// Six-ray inside votes per grid node (0..=6).
+    votes: Vec<u8>,
+    /// Per-cell bitmask: bit `axis` set iff the axis edge from `(x, y, z)` to
+    /// `+1` along `axis` never exits the solid union into air.
+    axis_open: Vec<u8>,
+}
+
+/// Six-ray inside votes per grid node, plus exact surface-cut axis edge flags.
+fn ray_analysis(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], shell: &[u32], use_tri: &dyn Fn(usize) -> bool, compute_edges: bool) -> RayData {
+    let total = g.cell.len();
+    let mut votes = vec![0u8; total];
+    let mut axis_open = if compute_edges { vec![0u8; total] } else { Vec::new() };
+    if pos.is_empty() || tris.is_empty() {
+        return RayData { votes, axis_open };
+    }
     let n = g.n;
-    // Rays sit a hair off the voxel centres so they never run exactly
-    // through a vertex or an edge of a grid-aligned mesh.
-    let (eu, ev) = (0.013_7, 0.029_1);
     let mut odd = vec![false; pos.len()];
+    let mut shell_hits = vec![0u32; pos.len()];
+
     for axis in 0..3 {
         let (ua, va) = ((axis + 1) % 3, (axis + 2) % 3);
-        let (nu, nv) = (n[ua], n[va]);
+        let (nu, nv, nk) = (n[ua], n[va], n[axis]);
+        let (eu, ev, ea) = (RAY_EPS[ua], RAY_EPS[va], RAY_EPS[axis]);
         let mut hits: Vec<Vec<(f64, u32)>> = vec![Vec::new(); nu * nv];
-        for (ti, t) in tris.iter().enumerate() {
+
+        for (ti, &t) in tris.iter().enumerate() {
             if !use_tri(ti) {
                 continue;
             }
-            let c: Vec<[f64; 3]> = t.iter().map(|&i| g.coord(pos[i as usize])).collect();
-            let (a, b, cc) = ((c[0][ua], c[0][va]), (c[1][ua], c[1][va]), (c[2][ua], c[2][va]));
+            let c0 = g.coord(pos[t[0] as usize]);
+            let c1 = g.coord(pos[t[1] as usize]);
+            let c2 = g.coord(pos[t[2] as usize]);
+            let (a, b, cc) = ((c0[ua], c0[va]), (c1[ua], c1[va]), (c2[ua], c2[va]));
             let area = (b.0 - a.0) * (cc.1 - a.1) - (b.1 - a.1) * (cc.0 - a.0);
             if area.abs() < 1e-14 {
                 continue;
@@ -129,26 +177,22 @@ fn ray_votes(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) 
             if u1 < 0.0 || v1 < 0.0 {
                 continue;
             }
-            for iv in v0..=(v1 as usize).min(nv - 1) {
-                for iu in u0..=(u1 as usize).min(nu - 1) {
+            let u1 = (u1 as usize).min(nu - 1);
+            let v1 = (v1 as usize).min(nv - 1);
+            let sh = shell[ti];
+            for iv in v0..=v1 {
+                for iu in u0..=u1 {
                     let p = (iu as f64 + eu, iv as f64 + ev);
-                    let e = |s: (f64, f64), t: (f64, f64)| (t.0 - s.0) * (p.1 - s.1) - (t.1 - s.1) * (p.0 - s.0);
-                    let (e0, e1, e2) = (e(a, b), e(b, cc), e(cc, a));
-                    if !((e0 > 0.0 && e1 > 0.0 && e2 > 0.0) || (e0 < 0.0 && e1 < 0.0 && e2 < 0.0)) {
-                        continue;
+                    if let Some(depth) = ray_tri_2d(t, a, b, cc, c0[axis], c1[axis], c2[axis], p) {
+                        hits[iv * nu + iu].push((depth, sh));
                     }
-                    let depth = (e1 * c[0][axis] + e2 * c[1][axis] + e0 * c[2][axis]) / area;
-                    hits[iv * nu + iu].push((depth, shell[ti]));
                 }
             }
         }
+
+        let bit = 1u8 << axis;
         for iv in 0..nv {
             for iu in 0..nu {
-                let list = &mut hits[iv * nu + iu];
-                if list.is_empty() {
-                    continue;
-                }
-                list.sort_by(|x, y| x.0.total_cmp(&y.0));
                 let cell = |k: usize| {
                     let mut q = [0usize; 3];
                     q[axis] = k;
@@ -156,39 +200,118 @@ fn ray_votes(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) 
                     q[va] = iv;
                     g.idx(q[0], q[1], q[2])
                 };
-                // From the low end, then from the high end.
-                for from_low in [true, false] {
-                    let mut count = 0usize;
-                    let mut h = 0usize;
-                    let order: Vec<usize> = if from_low { (0..n[axis]).collect() } else { (0..n[axis]).rev().collect() };
-                    for k in order {
-                        let kf = k as f64;
-                        while h < list.len() {
-                            let (d, sh) = if from_low { list[h] } else { list[list.len() - 1 - h] };
-                            if (from_low && d >= kf) || (!from_low && d <= kf) {
-                                break;
-                            }
-                            let o = &mut odd[sh as usize];
+                let list = &mut hits[iv * nu + iu];
+                if list.is_empty() {
+                    if compute_edges {
+                        for k in 0..nk.saturating_sub(1) {
+                            axis_open[cell(k)] |= bit;
+                        }
+                    }
+                    continue;
+                }
+                list.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+                if compute_edges {
+                    for &(_, sh) in list.iter() {
+                        shell_hits[sh as usize] += 1;
+                    }
+                }
+
+                // Sweep from low to high: accumulate low-ray votes and cut axis edges.
+                let mut count = 0usize;
+                let mut even_count = 0usize;
+                let mut h = 0usize;
+                while h < list.len() && list[h].0 < ea {
+                    let sh = list[h].1 as usize;
+                    let o = &mut odd[sh];
+                    *o = !*o;
+                    if *o {
+                        count += 1;
+                        if compute_edges && shell_hits[sh] & 1 == 0 {
+                            even_count += 1;
+                        }
+                    } else {
+                        count -= 1;
+                        if compute_edges && shell_hits[sh] & 1 == 0 {
+                            even_count -= 1;
+                        }
+                    }
+                    h += 1;
+                }
+                if count > 0 {
+                    votes[cell(0)] += 1;
+                }
+                for k in 0..nk.saturating_sub(1) {
+                    let mut stayed = even_count > 0;
+                    let mut had_hit = false;
+                    let next_kf = (k + 1) as f64 + ea;
+                    while h < list.len() && list[h].0 < next_kf {
+                        had_hit = true;
+                        let d0 = list[h].0;
+                        while h < list.len() && list[h].0 < next_kf && (list[h].0 - d0) <= 1e-7 {
+                            let sh = list[h].1 as usize;
+                            let o = &mut odd[sh];
                             *o = !*o;
                             if *o {
                                 count += 1;
+                                if compute_edges && shell_hits[sh] & 1 == 0 {
+                                    even_count += 1;
+                                }
                             } else {
                                 count -= 1;
+                                if compute_edges && shell_hits[sh] & 1 == 0 {
+                                    even_count -= 1;
+                                }
                             }
                             h += 1;
                         }
-                        if count > 0 {
-                            votes[cell(k)] += 1;
+                        if even_count == 0 {
+                            stayed = false;
                         }
                     }
-                    for &(_, sh) in list.iter() {
-                        odd[sh as usize] = false;
+                    if count > 0 {
+                        votes[cell(k + 1)] += 1;
+                    }
+                    if even_count == 0 {
+                        stayed = false;
+                    }
+                    if compute_edges && (!had_hit || stayed) {
+                        axis_open[cell(k)] |= bit;
+                    }
+                }
+                for &(_, sh) in list.iter() {
+                    odd[sh as usize] = false;
+                }
+
+                // Sweep from high to low: accumulate high-ray votes.
+                let mut count = 0usize;
+                let mut h = list.len();
+                for k in (0..nk).rev() {
+                    let kf = k as f64 + ea;
+                    while h > 0 && list[h - 1].0 > kf {
+                        let sh = list[h - 1].1 as usize;
+                        let o = &mut odd[sh];
+                        *o = !*o;
+                        if *o {
+                            count += 1;
+                        } else {
+                            count -= 1;
+                        }
+                        h -= 1;
+                    }
+                    if count > 0 {
+                        votes[cell(k)] += 1;
+                    }
+                }
+                for &(_, sh) in list.iter() {
+                    odd[sh as usize] = false;
+                    if compute_edges {
+                        shell_hits[sh as usize] = 0;
                     }
                 }
             }
         }
     }
-    votes
+    RayData { votes, axis_open }
 }
 
 /// Holes in a surface: loops of edges that have one face, as (count,
@@ -239,21 +362,25 @@ fn openings(pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) -> bool) ->
     (boxes.len(), largest)
 }
 
-pub fn voxelize(pos: &[Vec3], tris: &[[u32; 3]], res: usize) -> Grid {
-    voxelize_body(pos, tris, res, None).0
-}
-
-/// `voxelize`, and how sealed the body is (`body[t]` marks the triangles
-/// of the body, as against open pieces such as a cape; all when `None`).
-pub fn voxelize_body(pos: &[Vec3], tris: &[[u32; 3]], res: usize, body: Option<&[bool]>) -> (Grid, Solid) {
+fn voxelize_internal(
+    pos: &[Vec3],
+    tris: &[[u32; 3]],
+    res: usize,
+    body: Option<&[bool]>,
+    compute_edges: bool,
+) -> (Grid, Solid, RayData, Vec<u32>) {
     let mut lo = v3(f64::MAX, f64::MAX, f64::MAX);
     let mut hi = -lo;
     for p in pos {
         lo = lo.min(*p);
         hi = hi.max(*p);
     }
+    if pos.is_empty() {
+        lo = Vec3::ZERO;
+        hi = Vec3::ZERO;
+    }
     let ext = hi - lo;
-    let h = (ext.max_elem() / res as f64).max(1e-9);
+    let h = (ext.max_elem() / res.max(1) as f64).max(1e-9);
     let pad = 2.0;
     let origin = lo - v3(pad, pad, pad) * h;
     let n = [
@@ -311,11 +438,12 @@ pub fn voxelize_body(pos: &[Vec3], tris: &[[u32; 3]], res: usize, body: Option<&
         push(x, y, z - 1);
         push(x, y, z + 1);
     }
+    let shell = tri_shells(pos.len(), tris);
     let all = |_: usize| true;
-    let votes = ray_votes(&g, pos, tris, &all);
+    let ray_data = ray_analysis(&g, pos, tris, &shell, &all, compute_edges);
     let mut flooded = 0usize;
     for i in 0..total {
-        if g.cell[i] == 0 && (!outside[i] || votes[i] >= 4) {
+        if g.cell[i] == 0 && (!outside[i] || ray_data.votes[i] >= 4) {
             if outside[i] {
                 flooded += 1;
             }
@@ -325,7 +453,13 @@ pub fn voxelize_body(pos: &[Vec3], tris: &[[u32; 3]], res: usize, body: Option<&
     // How sealed the body is: its own triangles only, so an open piece
     // (a cape is a sheet) is not counted as an opening.
     let is_body = |t: usize| body.is_none_or(|b| b[t]);
-    let body_votes = if body.is_some_and(|b| b.iter().any(|x| !x)) { ray_votes(&g, pos, tris, &is_body) } else { votes };
+    let body_votes_owned;
+    let body_votes: &[u8] = if body.is_some_and(|b| b.iter().any(|x| !x)) {
+        body_votes_owned = ray_analysis(&g, pos, tris, &shell, &is_body, false).votes;
+        &body_votes_owned
+    } else {
+        &ray_data.votes
+    };
     let (mut inside, mut tied) = (0usize, 0usize);
     for i in 0..total {
         if g.cell[i] == 1 {
@@ -340,15 +474,7 @@ pub fn voxelize_body(pos: &[Vec3], tris: &[[u32; 3]], res: usize, body: Option<&
     let (n_open, largest) = openings(pos, tris, &is_body);
     let interior = (0..total).filter(|&i| g.cell[i] == 2).count();
     let contested = tied as f64 / (inside + tied).max(1) as f64;
-    let scale = {
-        let mut lo = v3(f64::MAX, f64::MAX, f64::MAX);
-        let mut hi = -lo;
-        for p in pos {
-            lo = lo.min(*p);
-            hi = hi.max(*p);
-        }
-        (hi - lo).max_elem().max(1e-9)
-    };
+    let scale = ext.max_elem().max(1e-9);
     let solid = Solid {
         openings: n_open,
         largest_opening: (largest / scale * 1e4).round() / 1e4,
@@ -356,10 +482,21 @@ pub fn voxelize_body(pos: &[Vec3], tris: &[[u32; 3]], res: usize, body: Option<&
         contested: (contested * 1e4).round() / 1e4,
         trusted: contested <= MAX_CONTESTED,
     };
+    (g, solid, ray_data, shell)
+}
+
+pub fn voxelize(pos: &[Vec3], tris: &[[u32; 3]], res: usize) -> Grid {
+    voxelize_body(pos, tris, res, None).0
+}
+
+/// `voxelize`, and how sealed the body is (`body[t]` marks the triangles
+/// of the body, as against open pieces such as a cape; all when `None`).
+pub fn voxelize_body(pos: &[Vec3], tris: &[[u32; 3]], res: usize, body: Option<&[bool]>) -> (Grid, Solid) {
+    let (g, solid, _, _) = voxelize_internal(pos, tris, res, body, false);
     (g, solid)
 }
 
-/// Per-vertex nearest bones by voxel geodesic distance.
+/// Per-vertex nearest bones by cut-cell geodesic distance.
 pub struct Geo {
     /// Up to K (joint, distance) per vertex, ascending distance.
     pub near: Vec<Vec<(u32, f32)>>,
@@ -388,63 +525,831 @@ impl Geo {
     }
 }
 
-fn bone_seeds(g: &Grid, a: Vec3, b: Vec3) -> Vec<(usize, f32)> {
-    let len = (b - a).len();
-    let steps = ((len / (g.h * 0.5)).ceil() as usize).max(1);
-    let mut seeds = Vec::new();
-    for s in 0..=steps {
-        let p = a.lerp(b, s as f64 / steps as f64);
-        if let Some([x, y, z]) = g.cell_of(p) {
-            let i = g.idx(x, y, z);
-            if g.solid(i) {
-                seeds.push((i, 0.0));
-            }
-        }
+/// Scale-invariant open-segment vs triangle intersection returning `t in (1e-6, 1 - 1e-6)`,
+/// conservatively inclusive on triangle edges so rays cannot slip through shared edges.
+#[inline]
+fn seg_tri_t(p0: Vec3, dir: Vec3, dir_len2: f64, a: Vec3, b: Vec3, c: Vec3) -> Option<f64> {
+    let e1 = b - a;
+    let e2 = c - a;
+    let h = dir.cross(e2);
+    let det = e1.dot(h);
+    let scale2 = e1.len2() * e2.len2() * dir_len2;
+    if det * det <= 1e-24 * scale2 {
+        return None;
     }
-    if seeds.is_empty() {
-        // Bone outside the mesh: seed the nearest solid voxel(s).
-        let mut best = (f64::MAX, 0usize);
-        for z in 0..g.n[2] {
-            for y in 0..g.n[1] {
-                for x in 0..g.n[0] {
-                    let i = g.idx(x, y, z);
-                    if g.solid(i) {
-                        let d = segment_distance(g.center(x, y, z), a, b).1;
-                        if d < best.0 {
-                            best = (d, i);
+    let inv = 1.0 / det;
+    let s = p0 - a;
+    let u = inv * s.dot(h);
+    if !(-1e-7..=1.0 + 1e-7).contains(&u) {
+        return None;
+    }
+    let q = s.cross(e1);
+    let v = inv * dir.dot(q);
+    if v < -1e-7 || u + v > 1.0 + 1e-7 {
+        return None;
+    }
+    let t = inv * e2.dot(q);
+    (t > 1e-6 && t < 1.0 - 1e-6).then_some(t)
+}
+
+#[inline]
+fn seg_hits_tri(p0: Vec3, dir: Vec3, dir_len2: f64, a: Vec3, b: Vec3, c: Vec3) -> bool {
+    seg_tri_t(p0, dir, dir_len2, a, b, c).is_some()
+}
+
+/// Flat CSR grid mapping each voxel cell to the triangles touching its box.
+struct TriGrid {
+    n: [usize; 3],
+    origin: Vec3,
+    h: f64,
+    offs: Vec<u32>,
+    tris: Vec<u32>,
+}
+
+impl TriGrid {
+    fn build(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]]) -> Self {
+        let total = g.cell.len();
+        let n = g.n;
+        let inv_h = 1.0 / g.h;
+        let mut counts = vec![0u32; total];
+        let each_cells = |visit: &mut dyn FnMut(usize, u32)| {
+            for (ti, &t) in tris.iter().enumerate() {
+                let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                let lo = a.min(b).min(c);
+                let hi = a.max(b).max(c);
+                let x0 = (((lo.x - g.origin.x) * inv_h - 1e-4).floor().max(0.0) as usize).min(n[0] - 1);
+                let y0 = (((lo.y - g.origin.y) * inv_h - 1e-4).floor().max(0.0) as usize).min(n[1] - 1);
+                let z0 = (((lo.z - g.origin.z) * inv_h - 1e-4).floor().max(0.0) as usize).min(n[2] - 1);
+                let x1 = (((hi.x - g.origin.x) * inv_h + 1e-4).floor().max(0.0) as usize).min(n[0] - 1);
+                let y1 = (((hi.y - g.origin.y) * inv_h + 1e-4).floor().max(0.0) as usize).min(n[1] - 1);
+                let z1 = (((hi.z - g.origin.z) * inv_h + 1e-4).floor().max(0.0) as usize).min(n[2] - 1);
+                let span = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1);
+                let plane = if span > 8 {
+                    let nn = (b - a).cross(c - a);
+                    let r = (nn.x.abs() + nn.y.abs() + nn.z.abs()) * (0.5005 * g.h);
+                    Some((nn, r))
+                } else {
+                    None
+                };
+                for cz in z0..=z1 {
+                    for cy in y0..=y1 {
+                        let row = (cz * n[1] + cy) * n[0];
+                        for cx in x0..=x1 {
+                            if let Some((nn, r)) = plane {
+                                let cc = g.center(cx, cy, cz);
+                                if nn.dot(cc - a).abs() > r {
+                                    continue;
+                                }
+                            }
+                            visit(row + cx, ti as u32);
+                        }
+                    }
+                }
+            }
+        };
+        each_cells(&mut |cell, _| counts[cell] += 1);
+        let mut offs = vec![0u32; total + 1];
+        for i in 0..total {
+            offs[i + 1] = offs[i] + counts[i];
+        }
+        let mut cursor = offs[..total].to_vec();
+        let mut data = vec![0u32; offs[total] as usize];
+        each_cells(&mut |cell, ti| {
+            let p = cursor[cell] as usize;
+            data[p] = ti;
+            cursor[cell] += 1;
+        });
+        TriGrid { n, origin: g.origin, h: g.h, offs, tris: data }
+    }
+
+    #[inline]
+    fn cell_empty(&self, idx: usize) -> bool {
+        self.offs[idx] == self.offs[idx + 1]
+    }
+
+    #[inline]
+    fn cell_of_clamped(&self, p: Vec3) -> [usize; 3] {
+        let inv_h = 1.0 / self.h;
+        [
+            (((p.x - self.origin.x) * inv_h).floor().max(0.0) as usize).min(self.n[0] - 1),
+            (((p.y - self.origin.y) * inv_h).floor().max(0.0) as usize).min(self.n[1] - 1),
+            (((p.z - self.origin.z) * inv_h).floor().max(0.0) as usize).min(self.n[2] - 1),
+        ]
+    }
+
+    fn seg_hits_in_cells(
+        &self,
+        p0: Vec3,
+        p1: Vec3,
+        lo: [usize; 3],
+        hi: [usize; 3],
+        pos: &[Vec3],
+        tris: &[[u32; 3]],
+        ev: Option<u32>,
+    ) -> bool {
+        let dir = p1 - p0;
+        let dir_len2 = dir.len2();
+        if dir_len2 < 1e-24 {
+            return false;
+        }
+        let (nx, ny) = (self.n[0], self.n[1]);
+        for cz in lo[2]..=hi[2] {
+            for cy in lo[1]..=hi[1] {
+                let row = (cz * ny + cy) * nx;
+                for cx in lo[0]..=hi[0] {
+                    let c = row + cx;
+                    let s = self.offs[c] as usize;
+                    let e = self.offs[c + 1] as usize;
+                    for &ti in &self.tris[s..e] {
+                        let t = tris[ti as usize];
+                        if let Some(v) = ev {
+                            if t[0] == v || t[1] == v || t[2] == v {
+                                continue;
+                            }
+                        }
+                        if seg_hits_tri(p0, dir, dir_len2, pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]) {
+                            return true;
                         }
                     }
                 }
             }
         }
-        if best.0 < f64::MAX {
+        false
+    }
+
+    fn seg_hits_any(&self, p0: Vec3, p1: Vec3, pos: &[Vec3], tris: &[[u32; 3]], exclude_vert: Option<u32>) -> bool {
+        let inv_h = 1.0 / self.h;
+        let lo = p0.min(p1);
+        let hi = p0.max(p1);
+        let c0 = [
+            (((lo.x - self.origin.x) * inv_h - 1e-4).floor().max(0.0) as usize).min(self.n[0] - 1),
+            (((lo.y - self.origin.y) * inv_h - 1e-4).floor().max(0.0) as usize).min(self.n[1] - 1),
+            (((lo.z - self.origin.z) * inv_h - 1e-4).floor().max(0.0) as usize).min(self.n[2] - 1),
+        ];
+        let c1 = [
+            (((hi.x - self.origin.x) * inv_h + 1e-4).floor().max(0.0) as usize).min(self.n[0] - 1),
+            (((hi.y - self.origin.y) * inv_h + 1e-4).floor().max(0.0) as usize).min(self.n[1] - 1),
+            (((hi.z - self.origin.z) * inv_h + 1e-4).floor().max(0.0) as usize).min(self.n[2] - 1),
+        ];
+        self.seg_hits_in_cells(p0, p1, c0, c1, pos, tris, exclude_vert)
+    }
+
+    /// True if the open segment `p0 -> p1` stays inside the solid union
+    /// (allowing internal crossings of overlapping shells, rejecting any air gap).
+    fn seg_stays_inside(&self, p0: Vec3, p1: Vec3, pos: &[Vec3], tris: &[[u32; 3]], shell: &[u32]) -> bool {
+        let dir = p1 - p0;
+        let dir_len2 = dir.len2();
+        if dir_len2 < 1e-24 {
+            return true;
+        }
+        let inv_h = 1.0 / self.h;
+        let lo = p0.min(p1);
+        let hi = p0.max(p1);
+        let c0 = [
+            (((lo.x - self.origin.x) * inv_h - 1e-4).floor().max(0.0) as usize).min(self.n[0] - 1),
+            (((lo.y - self.origin.y) * inv_h - 1e-4).floor().max(0.0) as usize).min(self.n[1] - 1),
+            (((lo.z - self.origin.z) * inv_h - 1e-4).floor().max(0.0) as usize).min(self.n[2] - 1),
+        ];
+        let c1 = [
+            (((hi.x - self.origin.x) * inv_h + 1e-4).floor().max(0.0) as usize).min(self.n[0] - 1),
+            (((hi.y - self.origin.y) * inv_h + 1e-4).floor().max(0.0) as usize).min(self.n[1] - 1),
+            (((hi.z - self.origin.z) * inv_h + 1e-4).floor().max(0.0) as usize).min(self.n[2] - 1),
+        ];
+        let mut ts = Vec::new();
+        let (nx, ny) = (self.n[0], self.n[1]);
+        for cz in c0[2]..=c1[2] {
+            for cy in c0[1]..=c1[1] {
+                let row = (cz * ny + cy) * nx;
+                for cx in c0[0]..=c1[0] {
+                    let c = row + cx;
+                    let s = self.offs[c] as usize;
+                    let e = self.offs[c + 1] as usize;
+                    for &ti in &self.tris[s..e] {
+                        let t = tris[ti as usize];
+                        if let Some(th) = seg_tri_t(p0, dir, dir_len2, pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]) {
+                            ts.push(th);
+                        }
+                    }
+                }
+            }
+        }
+        if ts.is_empty() {
+            return true;
+        }
+        ts.sort_by(|a, b| a.total_cmp(b));
+        let mut prev = 0.0f64;
+        for &th in &ts {
+            if th - prev > 1e-5 {
+                let mid = p0 + dir * (0.5 * (prev + th));
+                if !self.point_inside_and_nearest_tris(mid, pos, tris, shell).0 {
+                    return false;
+                }
+            }
+            prev = th;
+        }
+        if 1.0 - prev > 1e-5 {
+            let mid = p0 + dir * (0.5 * (prev + 1.0));
+            if !self.point_inside_and_nearest_tris(mid, pos, tris, shell).0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Exact six-ray point-in-solid test at an arbitrary world point `p`, also
+    /// returning the nearest enclosing hit triangles along the six rays (used
+    /// for bone seeds inside thin parts narrower than a voxel cell).
+    fn point_inside_and_nearest_tris(&self, p: Vec3, pos: &[Vec3], tris: &[[u32; 3]], shell: &[u32]) -> (bool, Vec<(usize, Vec3)>) {
+        // Tiny sub-micron nudge keeps rays off exact mesh vertex grid lines.
+        let pq = p + v3(1.37e-5, 2.91e-5, 4.19e-5) * self.h;
+        let cell = self.cell_of_clamped(pq);
+        let mut votes = 0u8;
+        let mut nearest = Vec::new();
+        let mut cand = Vec::new();
+        let mut low_shells = Vec::new();
+        let mut high_shells = Vec::new();
+
+        for axis in 0..3 {
+            let (ua, va) = ((axis + 1) % 3, (axis + 2) % 3);
+            let (cu, cv) = (cell[ua], cell[va]);
+            cand.clear();
+            for k in 0..self.n[axis] {
+                let mut q = [0usize; 3];
+                q[axis] = k;
+                q[ua] = cu;
+                q[va] = cv;
+                let idx = (q[2] * self.n[1] + q[1]) * self.n[0] + q[0];
+                let s = self.offs[idx] as usize;
+                let e = self.offs[idx + 1] as usize;
+                cand.extend_from_slice(&self.tris[s..e]);
+            }
+            if cand.is_empty() {
+                continue;
+            }
+            cand.sort_unstable();
+            cand.dedup();
+            low_shells.clear();
+            high_shells.clear();
+            let mut best_lo: Option<(f64, usize, f64)> = None;
+            let mut best_hi: Option<(f64, usize, f64)> = None;
+            let p2 = (pq[ua], pq[va]);
+            let pa = pq[axis];
+
+            for &ti in &cand {
+                let t = tris[ti as usize];
+                let (v0, v1, v2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                let (a, b, c) = ((v0[ua], v0[va]), (v1[ua], v1[va]), (v2[ua], v2[va]));
+                if let Some(depth) = ray_tri_2d(t, a, b, c, v0[axis], v1[axis], v2[axis], p2) {
+                    let sh = shell[ti as usize];
+                    if depth < pa {
+                        low_shells.push(sh);
+                        let dist = pa - depth;
+                        if best_lo.is_none_or(|b| dist < b.0) {
+                            best_lo = Some((dist, ti as usize, depth));
+                        }
+                    } else if depth > pa {
+                        high_shells.push(sh);
+                        let dist = depth - pa;
+                        if best_hi.is_none_or(|b| dist < b.0) {
+                            best_hi = Some((dist, ti as usize, depth));
+                        }
+                    }
+                }
+            }
+
+            let has_odd = |shells: &mut Vec<u32>| -> bool {
+                shells.sort_unstable();
+                let mut i = 0;
+                while i < shells.len() {
+                    let mut j = i + 1;
+                    while j < shells.len() && shells[j] == shells[i] {
+                        j += 1;
+                    }
+                    if (j - i) & 1 == 1 {
+                        return true;
+                    }
+                    i = j;
+                }
+                false
+            };
+            if has_odd(&mut low_shells) {
+                votes += 1;
+            }
+            if has_odd(&mut high_shells) {
+                votes += 1;
+            }
+            for hit in [best_lo, best_hi].into_iter().flatten() {
+                let mut hp = [pq.x, pq.y, pq.z];
+                hp[axis] = hit.2;
+                nearest.push((hit.1, v3(hp[0], hp[1], hp[2])));
+            }
+        }
+        (votes >= 4, nearest)
+    }
+}
+
+/// Flat CSR grid mapping each voxel cell to the mesh vertices inside it.
+struct VertGrid {
+    n: [usize; 3],
+    offs: Vec<u32>,
+    verts: Vec<u32>,
+}
+
+impl VertGrid {
+    fn build(g: &Grid, pos: &[Vec3]) -> Self {
+        let total = g.cell.len();
+        let n = g.n;
+        let inv_h = 1.0 / g.h;
+        let cell_of = |p: Vec3| {
+            let cx = (((p.x - g.origin.x) * inv_h).floor().max(0.0) as usize).min(n[0] - 1);
+            let cy = (((p.y - g.origin.y) * inv_h).floor().max(0.0) as usize).min(n[1] - 1);
+            let cz = (((p.z - g.origin.z) * inv_h).floor().max(0.0) as usize).min(n[2] - 1);
+            (cz * n[1] + cy) * n[0] + cx
+        };
+        let mut counts = vec![0u32; total];
+        for &p in pos {
+            counts[cell_of(p)] += 1;
+        }
+        let mut offs = vec![0u32; total + 1];
+        for i in 0..total {
+            offs[i + 1] = offs[i] + counts[i];
+        }
+        let mut cursor = offs[..total].to_vec();
+        let mut verts = vec![0u32; offs[total] as usize];
+        for (vi, &p) in pos.iter().enumerate() {
+            let c = cell_of(p);
+            let slot = cursor[c] as usize;
+            verts[slot] = vi as u32;
+            cursor[c] += 1;
+        }
+        VertGrid { n, offs, verts }
+    }
+
+    #[inline]
+    fn cell_verts(&self, x: usize, y: usize, z: usize) -> &[u32] {
+        let c = (z * self.n[1] + y) * self.n[0] + x;
+        &self.verts[self.offs[c] as usize..self.offs[c + 1] as usize]
+    }
+}
+
+/// Unified cut-cell geodesic graph:
+/// - Nodes `0..n_int`: strictly interior grid nodes (`votes >= 4`) connected by
+///   surface-cut 26-neighbor edges.
+/// - Nodes `n_int..n_int + nv`: mesh vertices attached to unobstructed interior
+///   nodes and connected along surface mesh edges (supporting thin parts).
+struct CutCellGraph {
+    n_int: usize,
+    grid_to_node: Vec<u32>,
+    int_pos: Vec<Vec3>,
+    offs: Vec<u32>,
+    dst: Vec<u32>,
+    w: Vec<f32>,
+    /// Unobstructed 2x2x2 interior corners `(node, dist_to_v, trilinear_weight)` per vertex.
+    v_sample: Vec<Vec<(u32, f32, f64)>>,
+}
+
+impl CutCellGraph {
+    fn build(g: &Grid, model: &Model, ray: &RayData, tri_grid: &TriGrid) -> Self {
+        let (nx, ny, nz) = (g.n[0], g.n[1], g.n[2]);
+        let total = g.cell.len();
+        let nv = model.nverts();
+        let mut grid_to_node = vec![u32::MAX; total];
+        let mut int_pos = Vec::new();
+        for z in 0..nz {
+            for y in 0..ny {
+                let row = (z * ny + y) * nx;
+                for x in 0..nx {
+                    let i = row + x;
+                    if ray.votes[i] >= 4 {
+                        grid_to_node[i] = int_pos.len() as u32;
+                        int_pos.push(node_pos(g, x, y, z));
+                    }
+                }
+            }
+        }
+        let n_int = int_pos.len();
+        let n_nodes = n_int + nv;
+
+        // 13 positive-lexicographic 26-neighbor offsets (undirected edges added once).
+        let h = g.h as f32;
+        let step_open = |a: [usize; 3], b: [usize; 3]| -> bool {
+            let ia = g.idx(a[0], a[1], a[2]);
+            let ib = g.idx(b[0], b[1], b[2]);
+            if grid_to_node[ia] == u32::MAX || grid_to_node[ib] == u32::MAX {
+                return false;
+            }
+            let (lo, axis) = if a[0] != b[0] {
+                (if a[0] < b[0] { ia } else { ib }, 0u8)
+            } else if a[1] != b[1] {
+                (if a[1] < b[1] { ia } else { ib }, 1u8)
+            } else {
+                (if a[2] < b[2] { ia } else { ib }, 2u8)
+            };
+            (ray.axis_open[lo] & (1u8 << axis)) != 0
+        };
+
+        let axis_dirs: [([isize; 3], f32); 3] = [([1, 0, 0], h), ([0, 1, 0], h), ([0, 0, 1], h)];
+        let face_dirs: [([isize; 3], f32); 6] = [
+            ([1, 1, 0], h * std::f32::consts::SQRT_2),
+            ([-1, 1, 0], h * std::f32::consts::SQRT_2),
+            ([1, 0, 1], h * std::f32::consts::SQRT_2),
+            ([-1, 0, 1], h * std::f32::consts::SQRT_2),
+            ([0, 1, 1], h * std::f32::consts::SQRT_2),
+            ([0, -1, 1], h * std::f32::consts::SQRT_2),
+        ];
+        let diag3_len = h * 3.0f32.sqrt();
+        let space_dirs: [[isize; 3]; 4] = [[1, 1, 1], [-1, 1, 1], [1, -1, 1], [-1, -1, 1]];
+
+        // Build interior cut-cell edges per Z slice in parallel (deterministic order).
+        let slice_edges: Vec<Vec<(u32, u32, f32)>> = (0..nz)
+            .into_par_iter()
+            .map(|z| {
+                let mut edges = Vec::new();
+                for y in 0..ny {
+                    for x in 0..nx {
+                        let ia = g.idx(x, y, z);
+                        let u = grid_to_node[ia];
+                        if u == u32::MAX {
+                            continue;
+                        }
+                        let a = [x, y, z];
+                        let pa = int_pos[u as usize];
+
+                        // Axis edges.
+                        for &(d, len) in &axis_dirs {
+                            let (xx, yy, zz) = (x as isize + d[0], y as isize + d[1], z as isize + d[2]);
+                            if xx < 0 || yy < 0 || zz < 0 || xx as usize >= nx || yy as usize >= ny || zz as usize >= nz {
+                                continue;
+                            }
+                            let b = [xx as usize, yy as usize, zz as usize];
+                            if step_open(a, b) {
+                                let v = grid_to_node[g.idx(b[0], b[1], b[2])];
+                                edges.push((u, v, len));
+                            }
+                        }
+
+                        // 2D face diagonals: require a local open L-path and zero triangle hits.
+                        for &(d, len) in &face_dirs {
+                            let (xx, yy, zz) = (x as isize + d[0], y as isize + d[1], z as isize + d[2]);
+                            if xx < 0 || yy < 0 || zz < 0 || xx as usize >= nx || yy as usize >= ny || zz as usize >= nz {
+                                continue;
+                            }
+                            let b = [xx as usize, yy as usize, zz as usize];
+                            let v = grid_to_node[g.idx(b[0], b[1], b[2])];
+                            if v == u32::MAX {
+                                continue;
+                            }
+                            let (c1, c2) = if d[0] == 0 {
+                                ([x, b[1], z], [x, y, b[2]])
+                            } else if d[1] == 0 {
+                                ([b[0], y, z], [x, y, b[2]])
+                            } else {
+                                ([b[0], y, z], [x, b[1], z])
+                            };
+                            let path_ok = (step_open(a, c1) && step_open(c1, b)) || (step_open(a, c2) && step_open(c2, b));
+                            if !path_ok {
+                                continue;
+                            }
+                            let lo = [x.min(b[0]), y.min(b[1]), z.min(b[2])];
+                            let hi = [x.max(b[0]), y.max(b[1]), z.max(b[2])];
+                            let empty = tri_grid.cell_empty(ia)
+                                && tri_grid.cell_empty(g.idx(b[0], b[1], b[2]))
+                                && tri_grid.cell_empty(g.idx(c1[0], c1[1], c1[2]))
+                                && tri_grid.cell_empty(g.idx(c2[0], c2[1], c2[2]));
+                            let pb = int_pos[v as usize];
+                            if empty || !tri_grid.seg_hits_in_cells(pa, pb, lo, hi, &model.rest, &model.tris, None) {
+                                edges.push((u, v, len));
+                            }
+                        }
+
+                        // 3D space diagonals: require a local open 3-step axis path and zero triangle hits.
+                        for &d in &space_dirs {
+                            let (xx, yy, zz) = (x as isize + d[0], y as isize + d[1], z as isize + d[2]);
+                            if xx < 0 || yy < 0 || zz < 0 || xx as usize >= nx || yy as usize >= ny || zz as usize >= nz {
+                                continue;
+                            }
+                            let b = [xx as usize, yy as usize, zz as usize];
+                            let v = grid_to_node[g.idx(b[0], b[1], b[2])];
+                            if v == u32::MAX {
+                                continue;
+                            }
+                            let ax = [b[0], y, z];
+                            let ay = [x, b[1], z];
+                            let az = [x, y, b[2]];
+                            let bxy = [b[0], b[1], z];
+                            let bxz = [b[0], y, b[2]];
+                            let byz = [x, b[1], b[2]];
+                            let path_ok = (step_open(a, ax)
+                                && ((step_open(ax, bxy) && step_open(bxy, b)) || (step_open(ax, bxz) && step_open(bxz, b))))
+                                || (step_open(a, ay)
+                                    && ((step_open(ay, bxy) && step_open(bxy, b)) || (step_open(ay, byz) && step_open(byz, b))))
+                                || (step_open(a, az)
+                                    && ((step_open(az, bxz) && step_open(bxz, b)) || (step_open(az, byz) && step_open(byz, b))));
+                            if !path_ok {
+                                continue;
+                            }
+                            let lo = [x.min(b[0]), y.min(b[1]), z.min(b[2])];
+                            let hi = [x.max(b[0]), y.max(b[1]), z.max(b[2])];
+                            let mut empty = true;
+                            'box_check: for cz in lo[2]..=hi[2] {
+                                for cy in lo[1]..=hi[1] {
+                                    for cx in lo[0]..=hi[0] {
+                                        if !tri_grid.cell_empty(g.idx(cx, cy, cz)) {
+                                            empty = false;
+                                            break 'box_check;
+                                        }
+                                    }
+                                }
+                            }
+                            let pb = int_pos[v as usize];
+                            if empty || !tri_grid.seg_hits_in_cells(pa, pb, lo, hi, &model.rest, &model.tris, None) {
+                                edges.push((u, v, diag3_len));
+                            }
+                        }
+                    }
+                }
+                edges
+            })
+            .collect();
+
+        // Side-aware vertex attachments to unobstructed interior grid nodes.
+        let v_attach: Vec<(Vec<(u32, f32)>, Vec<(u32, f32, f64)>)> = (0..nv)
+            .into_par_iter()
+            .map(|v| {
+                let p = model.rest[v];
+                let raw = g.coord(p);
+                let c = [raw[0] - RAY_EPS[0], raw[1] - RAY_EPS[1], raw[2] - RAY_EPS[2]];
+                let base = [c[0].floor() as isize, c[1].floor() as isize, c[2].floor() as isize];
+                let f = [c[0] - base[0] as f64, c[1] - base[1] as f64, c[2] - base[2] as f64];
+                let mut edges = Vec::new();
+                let mut samples = Vec::new();
+
+                for k in 0..8 {
+                    let o = [k & 1, (k >> 1) & 1, (k >> 2) & 1];
+                    let ix = base[0] + o[0] as isize;
+                    let iy = base[1] + o[1] as isize;
+                    let iz = base[2] + o[2] as isize;
+                    if ix < 0 || iy < 0 || iz < 0 || ix as usize >= nx || iy as usize >= ny || iz as usize >= nz {
+                        continue;
+                    }
+                    let node = grid_to_node[g.idx(ix as usize, iy as usize, iz as usize)];
+                    if node == u32::MAX {
+                        continue;
+                    }
+                    let q = int_pos[node as usize];
+                    if !tri_grid.seg_hits_any(p, q, &model.rest, &model.tris, Some(v as u32)) {
+                        let len = (q - p).len() as f32;
+                        let w = (if o[0] == 1 { f[0] } else { 1.0 - f[0] })
+                            * (if o[1] == 1 { f[1] } else { 1.0 - f[1] })
+                            * (if o[2] == 1 { f[2] } else { 1.0 - f[2] });
+                        edges.push((node, len));
+                        samples.push((node, len, w.max(1e-6)));
+                    }
+                }
+
+                // Fallback for corners/ridges with no unobstructed 2x2x2 interior corner:
+                // check 3x3x3 neighborhood (still strictly side-aware via segment test).
+                if edges.is_empty() && n_int > 0 {
+                    let rc = [c[0].round() as isize, c[1].round() as isize, c[2].round() as isize];
+                    for dz in -1isize..=1 {
+                        for dy in -1isize..=1 {
+                            for dx in -1isize..=1 {
+                                let (ix, iy, iz) = (rc[0] + dx, rc[1] + dy, rc[2] + dz);
+                                if ix < 0 || iy < 0 || iz < 0 || ix as usize >= nx || iy as usize >= ny || iz as usize >= nz {
+                                    continue;
+                                }
+                                let node = grid_to_node[g.idx(ix as usize, iy as usize, iz as usize)];
+                                if node == u32::MAX {
+                                    continue;
+                                }
+                                let q = int_pos[node as usize];
+                                if !tri_grid.seg_hits_any(p, q, &model.rest, &model.tris, Some(v as u32)) {
+                                    edges.push((node, (q - p).len() as f32));
+                                }
+                            }
+                        }
+                    }
+                }
+                (edges, samples)
+            })
+            .collect();
+
+        // Only thin-part vertices (no 2x2x2 unobstructed interior corner) and
+        // their adjacent junction vertices enter the Dijkstra graph; thick body
+        // regions remain 100% pure volumetric cut-cell grid (density-invariant).
+        let has_2x2x2: Vec<bool> = v_attach.iter().map(|x| !x.1.is_empty()).collect();
+        let mut need_graph: Vec<bool> = has_2x2x2.iter().map(|&h| !h).collect();
+        for &[u, v] in &model.edges {
+            if !has_2x2x2[u as usize] || !has_2x2x2[v as usize] {
+                need_graph[u as usize] = true;
+                need_graph[v as usize] = true;
+            }
+        }
+
+        // Assemble deterministic CSR adjacency.
+        let mut deg = vec![0u32; n_nodes];
+        for list in &slice_edges {
+            for &(u, v, _) in list {
+                deg[u as usize] += 1;
+                deg[v as usize] += 1;
+            }
+        }
+        for (v, (edges, _)) in v_attach.iter().enumerate() {
+            if !need_graph[v] {
+                continue;
+            }
+            let vn = n_int + v;
+            deg[vn] += edges.len() as u32;
+            for &(u, _) in edges {
+                deg[u as usize] += 1;
+            }
+        }
+        for &[u, v] in &model.edges {
+            if !has_2x2x2[u as usize] || !has_2x2x2[v as usize] {
+                deg[n_int + u as usize] += 1;
+                deg[n_int + v as usize] += 1;
+            }
+        }
+        let mut offs = vec![0u32; n_nodes + 1];
+        for i in 0..n_nodes {
+            offs[i + 1] = offs[i] + deg[i];
+        }
+        let mut cursor = offs[..n_nodes].to_vec();
+        let m = offs[n_nodes] as usize;
+        let mut dst = vec![0u32; m];
+        let mut w = vec![0.0f32; m];
+        let mut push_edge = |u: usize, v: usize, len: f32| {
+            let su = cursor[u] as usize;
+            dst[su] = v as u32;
+            w[su] = len;
+            cursor[u] += 1;
+            let sv = cursor[v] as usize;
+            dst[sv] = u as u32;
+            w[sv] = len;
+            cursor[v] += 1;
+        };
+        for list in &slice_edges {
+            for &(u, v, len) in list {
+                push_edge(u as usize, v as usize, len);
+            }
+        }
+        let mut v_sample = Vec::with_capacity(nv);
+        for (v, (edges, samples)) in v_attach.into_iter().enumerate() {
+            if need_graph[v] {
+                let vn = n_int + v;
+                for (u, len) in edges {
+                    push_edge(vn, u as usize, len);
+                }
+            }
+            v_sample.push(samples);
+        }
+        for &[u, v] in &model.edges {
+            if !has_2x2x2[u as usize] || !has_2x2x2[v as usize] {
+                let len = (model.rest[u as usize] - model.rest[v as usize]).len() as f32;
+                push_edge(n_int + u as usize, n_int + v as usize, len);
+            }
+        }
+        CutCellGraph { n_int, grid_to_node, int_pos, offs, dst, w, v_sample }
+    }
+}
+
+fn bone_seeds(
+    g: &Grid,
+    graph: &CutCellGraph,
+    tri_grid: &TriGrid,
+    vert_grid: &VertGrid,
+    pos: &[Vec3],
+    tris: &[[u32; 3]],
+    shell: &[u32],
+    a: Vec3,
+    b: Vec3,
+) -> Vec<(usize, f32)> {
+    let (nx, ny, nz) = (g.n[0], g.n[1], g.n[2]);
+    let len = (b - a).len();
+    let steps = ((len / (g.h * 0.5)).ceil() as usize).max(1);
+    let mut seeds: Vec<(usize, f32)> = Vec::new();
+    let r2_thin = (1.5 * g.h).powi(2);
+
+    let mut was_inside = false;
+    let mut prev_p = a;
+    for s in 0..=steps {
+        let p = a.lerp(b, s as f64 / steps as f64);
+        // If an estimated bone segment exits the solid into air (e.g. a spine
+        // bone pointing diagonally to a shoulder child across an armpit gap),
+        // stop seeding so the bone never jumps into another limb.
+        if s > 0 && was_inside && !tris.is_empty() && !tri_grid.seg_stays_inside(prev_p, p, pos, tris, shell) {
+            break;
+        }
+        prev_p = p;
+        let raw = g.coord(p);
+        let c = [raw[0] - RAY_EPS[0], raw[1] - RAY_EPS[1], raw[2] - RAY_EPS[2]];
+        let base = [c[0].floor() as isize, c[1].floor() as isize, c[2].floor() as isize];
+        let mut found_int = false;
+        for k in 0..8 {
+            let ix = base[0] + (k & 1) as isize;
+            let iy = base[1] + ((k >> 1) & 1) as isize;
+            let iz = base[2] + ((k >> 2) & 1) as isize;
+            if ix < 0 || iy < 0 || iz < 0 || ix as usize >= nx || iy as usize >= ny || iz as usize >= nz {
+                continue;
+            }
+            let node = graph.grid_to_node[g.idx(ix as usize, iy as usize, iz as usize)];
+            if node == u32::MAX {
+                continue;
+            }
+            let q = graph.int_pos[node as usize];
+            if !tri_grid.seg_hits_any(p, q, pos, tris, None) {
+                let d = segment_distance(q, a, b).1 as f32;
+                seeds.push((node as usize, d));
+                found_int = true;
+            }
+        }
+        if found_int {
+            was_inside = true;
+        }
+
+        // Thin-part support: if no interior grid node is unobstructed from `p`,
+        // check whether `p` itself lies inside a thin solid (< h thick) and seed
+        // its enclosing surface vertices without crossing air gaps.
+        if !found_int && !tris.is_empty() {
+            let (inside, nearest_tris) = tri_grid.point_inside_and_nearest_tris(p, pos, tris, shell);
+            if inside {
+                was_inside = true;
+                for (ti, hit_pos) in nearest_tris {
+                    let dp = (p - hit_pos).len();
+                    if dp <= 2.0 * g.h {
+                        for &vi in &tris[ti] {
+                            let d = (dp + (pos[vi as usize] - hit_pos).len()) as f32;
+                            seeds.push((graph.n_int + vi as usize, d));
+                        }
+                    }
+                }
+                let cell = tri_grid.cell_of_clamped(p);
+                for dz in -1isize..=1 {
+                    let cz = cell[2] as isize + dz;
+                    if cz < 0 || cz as usize >= nz {
+                        continue;
+                    }
+                    for dy in -1isize..=1 {
+                        let cy = cell[1] as isize + dy;
+                        if cy < 0 || cy as usize >= ny {
+                            continue;
+                        }
+                        for dx in -1isize..=1 {
+                            let cx = cell[0] as isize + dx;
+                            if cx < 0 || cx as usize >= nx {
+                                continue;
+                            }
+                            for &vi in vert_grid.cell_verts(cx as usize, cy as usize, cz as usize) {
+                                let pv = pos[vi as usize];
+                                if (pv - p).len2() <= r2_thin && !tri_grid.seg_hits_any(p, pv, pos, tris, Some(vi)) {
+                                    let d = segment_distance(pv, a, b).1 as f32;
+                                    seeds.push((graph.n_int + vi as usize, d));
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if was_inside {
+                break;
+            }
+        }
+    }
+
+    if seeds.is_empty() {
+        // Bone outside the mesh: seed the nearest interior node or mesh vertex.
+        let mut best = (f64::MAX, usize::MAX);
+        for (i, &q) in graph.int_pos.iter().enumerate() {
+            let d = segment_distance(q, a, b).1;
+            if d < best.0 {
+                best = (d, i);
+            }
+        }
+        for (v, &pv) in pos.iter().enumerate() {
+            let d = segment_distance(pv, a, b).1;
+            if d < best.0 {
+                best = (d, graph.n_int + v);
+            }
+        }
+        if best.1 != usize::MAX {
             seeds.push((best.1, best.0 as f32));
         }
     }
-    seeds.sort_unstable_by_key(|s| s.0);
+
+    // Keep the smallest seed distance per node deterministically.
+    seeds.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)));
     seeds.dedup_by_key(|s| s.0);
     seeds
 }
 
-fn dijkstra(g: &Grid, seeds: &[(usize, f32)], cap: f32) -> Vec<f32> {
-    let mut dist = vec![f32::INFINITY; g.cell.len()];
+fn dijkstra(graph: &CutCellGraph, seeds: &[(usize, f32)], cap: f32) -> Vec<f32> {
+    let n_nodes = graph.offs.len() - 1;
+    let mut dist = vec![f32::INFINITY; n_nodes];
     let mut heap = BinaryHeap::new();
-    for &(i, d) in seeds {
-        dist[i] = d;
-        heap.push(Reverse((d.to_bits(), i as u32)));
-    }
-    let h = g.h as f32;
-    let (nx, ny, nz) = (g.n[0] as isize, g.n[1] as isize, g.n[2] as isize);
-    let mut offs = Vec::new();
-    for dz in -1isize..=1 {
-        for dy in -1isize..=1 {
-            for dx in -1isize..=1 {
-                if dx == 0 && dy == 0 && dz == 0 {
-                    continue;
-                }
-                let l = ((dx * dx + dy * dy + dz * dz) as f32).sqrt() * h;
-                offs.push((dx, dy, dz, l));
-            }
+    for &(i, raw_d) in seeds {
+        let d = if raw_d <= 0.0 { 0.0 } else { raw_d };
+        if d < dist[i] {
+            dist[i] = d;
+            heap.push(Reverse((d.to_bits(), i as u32)));
         }
     }
     while let Some(Reverse((db, i))) = heap.pop() {
@@ -453,19 +1358,11 @@ fn dijkstra(g: &Grid, seeds: &[(usize, f32)], cap: f32) -> Vec<f32> {
         if d > dist[i] || d > cap {
             continue;
         }
-        let x = (i as isize) % nx;
-        let y = ((i as isize) / nx) % ny;
-        let z = (i as isize) / (nx * ny);
-        for &(dx, dy, dz, l) in &offs {
-            let (xx, yy, zz) = (x + dx, y + dy, z + dz);
-            if xx < 0 || yy < 0 || zz < 0 || xx >= nx || yy >= ny || zz >= nz {
-                continue;
-            }
-            let j = ((zz * ny + yy) * nx + xx) as usize;
-            if g.cell[j] == 0 {
-                continue;
-            }
-            let nd = d + l;
+        let s = graph.offs[i] as usize;
+        let e = graph.offs[i + 1] as usize;
+        for k in s..e {
+            let j = graph.dst[k] as usize;
+            let nd = d + graph.w[k];
             if nd < dist[j] {
                 dist[j] = nd;
                 heap.push(Reverse((nd.to_bits(), j as u32)));
@@ -475,51 +1372,35 @@ fn dijkstra(g: &Grid, seeds: &[(usize, f32)], cap: f32) -> Vec<f32> {
     dist
 }
 
-/// Distance at p: trilinear over the solid voxel centers around it.
-fn sample(g: &Grid, dist: &[f32], p: Vec3, cap: f32) -> f32 {
-    let c = g.coord(p);
-    let base = [c[0].floor(), c[1].floor(), c[2].floor()];
-    let f = [c[0] - base[0], c[1] - base[1], c[2] - base[2]];
-    let (mut acc, mut wsum) = (0.0f64, 0.0f64);
-    let mut best = f32::INFINITY;
-    for k in 0..8 {
-        let o = [k & 1, (k >> 1) & 1, (k >> 2) & 1];
-        let mut idx = [0usize; 3];
-        let mut ok = true;
-        let mut w = 1.0;
-        for a in 0..3 {
-            let v = base[a] as isize + o[a] as isize;
-            if v < 0 || v as usize >= g.n[a] {
-                ok = false;
-                break;
+/// Side-aware distance at vertex `v`: smooth trilinear blend of `dist[q] + |p_v - q|`
+/// over unobstructed 2x2x2 interior corners, combined with the thin-part graph distance.
+#[inline]
+fn sample_vertex(graph: &CutCellGraph, dist: &[f32], v: usize, cap: f32) -> f32 {
+    let d_graph = dist[graph.n_int + v];
+    let samples = &graph.v_sample[v];
+    let d_smooth = if !samples.is_empty() {
+        let (mut acc, mut wsum) = (0.0f64, 0.0f64);
+        for &(node, len, w) in samples {
+            let dn = dist[node as usize];
+            if dn.is_finite() {
+                acc += (dn + len) as f64 * w;
+                wsum += w;
             }
-            idx[a] = v as usize;
-            w *= if o[a] == 1 { f[a] } else { 1.0 - f[a] };
         }
-        if !ok {
-            continue;
-        }
-        let i = g.idx(idx[0], idx[1], idx[2]);
-        if g.cell[i] == 0 || !dist[i].is_finite() {
-            continue;
-        }
-        best = best.min(dist[i]);
-        acc += dist[i] as f64 * w.max(1e-6);
-        wsum += w.max(1e-6);
-    }
-    if wsum > 0.0 {
-        (acc / wsum) as f32
-    } else if best.is_finite() {
-        best
+        if wsum > 0.0 { (acc / wsum) as f32 } else { f32::INFINITY }
     } else {
-        cap
-    }
+        f32::INFINITY
+    };
+    d_graph.min(d_smooth).min(cap)
 }
 
 /// Geodesic distances from every joint in `joints` to every vertex.
 pub fn geodesics(model: &Model, res: usize, joints: &[usize]) -> Geo {
     let body: Vec<bool> = model.tris.iter().map(|t| !model.parts[model.vpart[t[0] as usize] as usize].piece).collect();
-    let (g, solid) = voxelize_body(&model.rest, &model.tris, res, Some(&body));
+    let (g, solid, ray_data, shell) = voxelize_internal(&model.rest, &model.tris, res, Some(&body), true);
+    let tri_grid = TriGrid::build(&g, &model.rest, &model.tris);
+    let vert_grid = VertGrid::build(&g, &model.rest);
+    let graph = CutCellGraph::build(&g, model, &ray_data, &tri_grid);
     let cap = (model.scale * 0.75) as f32;
     let nv = model.nverts();
     let mut near: Vec<Vec<(u32, f32)>> = vec![Vec::new(); nv];
@@ -527,9 +1408,10 @@ pub fn geodesics(model: &Model, res: usize, joints: &[usize]) -> Geo {
         let cols: Vec<(u32, Vec<f32>)> = chunk
             .par_iter()
             .map(|&j| {
-                let seeds = bone_seeds(&g, model.skel.head[j], model.skel.tail[j]);
-                let dist = dijkstra(&g, &seeds, cap);
-                let col: Vec<f32> = model.rest.iter().map(|p| sample(&g, &dist, *p, cap).min(cap)).collect();
+                let seeds =
+                    bone_seeds(&g, &graph, &tri_grid, &vert_grid, &model.rest, &model.tris, &shell, model.skel.head[j], model.skel.tail[j]);
+                let dist = dijkstra(&graph, &seeds, cap);
+                let col: Vec<f32> = (0..nv).map(|v| sample_vertex(&graph, &dist, v, cap)).collect();
                 (j as u32, col)
             })
             .collect();
