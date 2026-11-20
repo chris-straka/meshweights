@@ -15,6 +15,7 @@
 //! carries its clips, and those are measured as they are (contact pass
 //! and all).
 
+use crate::anatomy::Body;
 use crate::math::{Quat, Vec3, v3};
 use crate::poses::Pose;
 use crate::scene::Model;
@@ -97,43 +98,93 @@ fn dir(m: &Model, j: usize) -> Option<Vec3> {
     (d.len() > 1e-9).then(|| d.normalized())
 }
 
+fn has_real_tail(m: &Model, j: usize) -> bool {
+    m.skel.jchildren[j].iter().any(|&c| (m.skel.head[c] - m.skel.tail[j]).len() < 1e-6)
+}
+
+/// Direct joint-to-joint map when `src` and `dst` share the same skeleton
+/// (same joint names and parent links, and matching rest directions on bones
+/// that have a real child at their tail).
+fn same_skeleton_map(src: &Model, dst: &Model) -> Option<Vec<(usize, usize)>> {
+    let n = dst.njoints();
+    if n == 0 || src.njoints() != n {
+        return None;
+    }
+    let mut by_name: BTreeMap<&str, usize> = BTreeMap::new();
+    for (s, name) in src.skel.names.iter().enumerate() {
+        if by_name.insert(name.as_str(), s).is_some() {
+            return None;
+        }
+    }
+    let mut map = Vec::with_capacity(n);
+    for (d, name) in dst.skel.names.iter().enumerate() {
+        let &s = by_name.get(name.as_str())?;
+        let dp = dst.skel.jparent[d].map(|p| dst.skel.names[p].as_str());
+        let sp = src.skel.jparent[s].map(|p| src.skel.names[p].as_str());
+        if dp != sp {
+            return None;
+        }
+        map.push((d, s));
+    }
+    for &(d, s) in &map {
+        if has_real_tail(dst, d) && has_real_tail(src, s) {
+            if let (Some(dd), Some(sd)) = (dir(dst, d), dir(src, s)) {
+                if dd.dot(sd) < 0.995 {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(map)
+}
+
 /// The source's clips on `dst`, sampled at `fps`. `names`: the clips to
 /// play (those missing are listed in `skipped`).
 pub fn transfer(src: &Model, src_name: &str, dst: &Model, names: &[String], fps: f64) -> Result<Motion, String> {
-    let (bs, bd) = (src.skel.anatomy.body, dst.skel.anatomy.body);
-    if bs != bd {
-        return Err(format!("the clips are for a {} body and this is a {} one", bs.as_str(), bd.as_str()));
-    }
-    let map = role_map(src, dst);
-    if map.len() < 8 {
-        return Err(format!("only {} bones in common by role", map.len()));
-    }
-    // The yaw about up (a 180-degree turn from from_to could tip the body
-    // over; review 2026-11-13).
-    let (fs, fd) = (src.skel.anatomy.forward, dst.skel.anatomy.forward);
-    let ang = fd.z.atan2(fd.x) - fs.z.atan2(fs.x);
-    let yaw = Quat::from_axis_angle(v3(0.0, 1.0, 0.0), -ang);
-    // Rest alignment for limbs (the spine and hips keep the target's own
-    // rest shape).
-    let limb = |role: &str| {
-        ["shoulder", "upper_arm", "forearm", "hand", "thigh", "shin", "foot", "toe", "neck", "head"].iter().any(|r| role.starts_with(r))
+    let (map, yaw, align) = if let Some(same) = same_skeleton_map(src, dst) {
+        let align: BTreeMap<usize, Quat> = same.iter().map(|&(d, _)| (d, Quat::IDENTITY)).collect();
+        (same, Quat::IDENTITY, align)
+    } else {
+        let (bs, bd) = (src.skel.anatomy.body, dst.skel.anatomy.body);
+        if bs != bd {
+            return Err(format!("the clips are for a {} body and this is a {} one", bs.as_str(), bd.as_str()));
+        }
+        let map = role_map(src, dst);
+        let min_bones = if bd == Body::Legged { 4 } else { 8 };
+        if map.len() < min_bones {
+            return Err(format!("only {} bones in common by role", map.len()));
+        }
+        // The yaw about up (a 180-degree turn from from_to could tip the body
+        // over; review 2026-11-13).
+        let (fs, fd) = (src.skel.anatomy.forward, dst.skel.anatomy.forward);
+        let ang = fd.z.atan2(fd.x) - fs.z.atan2(fs.x);
+        let yaw = Quat::from_axis_angle(v3(0.0, 1.0, 0.0), -ang);
+        // Rest alignment for limbs (the spine and hips keep the target's own
+        // rest shape).
+        let limb = |role: &str| {
+            ["shoulder", "upper_arm", "forearm", "hand", "thigh", "shin", "foot", "toe", "neck", "head", "leg", "tail"]
+                .iter()
+                .any(|r| role.starts_with(r))
+        };
+        let role_of: BTreeMap<usize, String> =
+            dst.skel.anatomy.roles.iter().flat_map(|(r, js)| js.iter().map(move |&j| (j, r.clone()))).collect();
+        let align: BTreeMap<usize, Quat> = map
+            .iter()
+            .map(|&(d, s)| {
+                // Only bones whose direction both rigs give (a child at the
+                // tail); an end bone's tail is a guess, and aligning to it bent
+                // feet and hands 70-100 degrees at rest (review 2026-11-13).
+                let a = match (role_of.get(&d), dir(dst, d), dir(src, s)) {
+                    (Some(r), Some(dd), Some(sd)) if limb(r) && has_real_tail(dst, d) && has_real_tail(src, s) => {
+                        Quat::from_to(dd, yaw.rotate(sd))
+                    }
+                    _ => Quat::IDENTITY,
+                };
+                (d, a)
+            })
+            .collect();
+        (map, yaw, align)
     };
-    let role_of: BTreeMap<usize, String> =
-        dst.skel.anatomy.roles.iter().flat_map(|(r, js)| js.iter().map(move |&j| (j, r.clone()))).collect();
-    let align: BTreeMap<usize, Quat> = map
-        .iter()
-        .map(|&(d, s)| {
-            // Only bones whose direction both rigs give (a child at the
-            // tail); an end bone's tail is a guess, and aligning to it bent
-            // feet and hands 70-100 degrees at rest (review 2026-11-13).
-            let real = |m: &Model, j: usize| m.skel.jchildren[j].iter().any(|&c| (m.skel.head[c] - m.skel.tail[j]).len() < 1e-6);
-            let a = match (role_of.get(&d), dir(dst, d), dir(src, s)) {
-                (Some(r), Some(dd), Some(sd)) if limb(r) && real(dst, d) && real(src, s) => Quat::from_to(dd, yaw.rotate(sd)),
-                _ => Quat::IDENTITY,
-            };
-            (d, a)
-        })
-        .collect();
     let src_of: BTreeMap<usize, usize> = map.iter().copied().collect();
     // Target joints in parent-first order.
     let depth = |j: usize| {

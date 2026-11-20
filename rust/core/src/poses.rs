@@ -493,6 +493,27 @@ pub fn generic(model: &Model) -> Vec<Pose> {
     out
 }
 
+/// Names of every animation clip with TRS channels in the model, in file order.
+pub fn clip_names(model: &Model) -> Vec<String> {
+    model
+        .glb
+        .arr("animations")
+        .iter()
+        .enumerate()
+        .filter_map(|(ai, anim)| {
+            let samplers = anim.get("samplers").and_then(Value::as_array)?;
+            let has_trs = anim.get("channels").and_then(Value::as_array)?.iter().any(|ch| {
+                let Some(path) = ch.get("target").and_then(|t| t.get("path")).and_then(Value::as_str) else { return false };
+                let Some(si) = ch.get("sampler").and_then(Value::as_u64) else { return false };
+                ch.get("target").and_then(|t| t.get("node")).and_then(Value::as_u64).is_some()
+                    && matches!(path, "translation" | "rotation" | "scale")
+                    && samplers.get(si as usize).is_some()
+            });
+            has_trs.then(|| anim.get("name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("clip{ai}")))
+        })
+        .collect()
+}
+
 /// Samples each animation clip at up to `per_clip` evenly spaced times.
 pub fn clip_poses(model: &Model, per_clip: usize) -> Vec<Pose> {
     clip_sample(model, Sampling::Count(per_clip)).into_iter().flat_map(|c| c.1).collect()

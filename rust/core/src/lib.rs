@@ -49,8 +49,8 @@ pub struct MotionSpec {
     /// A rigged GLB whose clips are put on the checked rig by role (the
     /// hero's file). None: the checked file's own clips, if it has any.
     pub source: Option<std::path::PathBuf>,
-    /// Clips to play (default `motion::GAME_CLIPS`; with no source, all
-    /// of the file's own).
+    /// Clips to play (default `motion::GAME_CLIPS` for humanoids, or every clip
+    /// in the source for non-humanoids; with no source, all of the file's own).
     pub clips: Option<Vec<String>>,
 }
 
@@ -99,12 +99,23 @@ pub fn motion_for(model: &scene::Model, own_clips: bool, spec: &MotionSpec) -> g
         Some(src) => {
             let sm = scene::Model::load(src)?;
             let sname = src.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            let names: Vec<String> = spec.clips.clone().unwrap_or_else(|| motion::GAME_CLIPS.iter().map(|s| s.to_string()).collect());
-            match motion::transfer(&sm, &sname, model, &names, motion::FPS) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    notes.push(format!("clips from {sname} not played: {e}"));
-                    None
+            let names: Vec<String> = spec.clips.clone().unwrap_or_else(|| {
+                if model.skel.anatomy.body == anatomy::Body::Humanoid && sm.skel.anatomy.body == anatomy::Body::Humanoid {
+                    motion::GAME_CLIPS.iter().map(|s| s.to_string()).collect()
+                } else {
+                    poses::clip_names(&sm)
+                }
+            });
+            if spec.clips.is_none() && names.is_empty() {
+                notes.push(format!("clips from {sname} not played: no clips in {sname}"));
+                None
+            } else {
+                match motion::transfer(&sm, &sname, model, &names, motion::FPS) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        notes.push(format!("clips from {sname} not played: {e}"));
+                        None
+                    }
                 }
             }
         }

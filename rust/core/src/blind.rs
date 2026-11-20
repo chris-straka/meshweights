@@ -342,8 +342,17 @@ pub fn map_vertices(src: &Model, dst: &Model, verts: &[u32]) -> Vec<u32> {
 /// the swap can tear.
 pub fn planted_bad(model: &Model, ctx: &Ctx, motion: bool) -> Option<(Weights, usize, Vec<u32>, String)> {
     let roles = &model.skel.anatomy.roles;
+    const FIXED: &[&str] = &["upper_arm", "forearm", "thigh", "shin", "hand", "foot"];
+    let mut bases: Vec<String> = FIXED.iter().map(|s| (*s).to_string()).collect();
+    for key in roles.keys() {
+        if let Some(base) = key.strip_suffix(".L") {
+            if !FIXED.contains(&base) && roles.contains_key(&format!("{base}.R")) {
+                bases.push(base.to_string());
+            }
+        }
+    }
     let mut best: Option<(Weights, usize, Vec<u32>, String, usize)> = None;
-    for base in ["upper_arm", "forearm", "thigh", "shin", "hand", "foot"] {
+    for base in &bases {
         let (Some(l), Some(r)) = (roles.get(&format!("{base}.L")), roles.get(&format!("{base}.R"))) else { continue };
         let mut swap: BTreeMap<u32, u32> = BTreeMap::new();
         for (a, b) in l.iter().zip(r.iter()) {
