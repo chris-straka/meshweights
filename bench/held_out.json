@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "frozen_at": "2026-11-19",
+  "dataset": "meshweights-heldout",
+  "note": "Frozen held-out set: 2 humans and 3 creatures never used in meshweights tuning. Files stay outside the repo (fleet data set `meshweights-heldout`, env `MESHWEIGHTS_HELDOUT` or `FLEET_DATA_MESHWEIGHTS_HELDOUT`).",
+  "rigs": [
+    {
+      "id": "human_01",
+      "kind": "human",
+      "sha256": "f864d39d29738561051bb29722894263c472752fb043732019eb7a42de962cd0"
+    },
+    {
+      "id": "human_02",
+      "kind": "human",
+      "sha256": "eab61f47fa8c54e019aa800e52c83b9e6a4e318075d7e177b81190c2b563823c"
+    },
+    {
+      "id": "creature_01",
+      "kind": "creature",
+      "sha256": "a1b2c5957b8dbdfa8b1ec4aa31db20c02e6e5e32e20a1ffe7bfeaa888cb94bd9"
+    },
+    {
+      "id": "creature_02",
+      "kind": "creature",
+      "sha256": "99f56de71262cf9de4b75581bc66232dc29513ea3e48071ca6e366eb283859be"
+    },
+    {
+      "id": "creature_03",
+      "kind": "creature",
+      "sha256": "9351450fe0cbcd1e4ede9b3e97fc2b3487ffb2e446c82c5222c71074bb37d425"
+    }
+  ]
+}
