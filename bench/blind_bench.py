@@ -4,6 +4,7 @@
     python3 bench/blind_bench.py --verify-manifest DIR [--held-out-manifest PATH]
     python3 bench/blind_bench.py --weights rust/target/release/weights \\
         --out DIR NAME=a.glb,b.glb [NAME=a.glb,b.glb ...] [--seed N] [--top N] \\
+        [--motion PATH] [--human-motion PATH] [--creature-motion PATH] \\
         [--ranking-claim] [--held-out-manifest PATH]
     python3 bench/blind_bench.py --score DIR/NAME --answers answers.json
     python3 bench/blind_bench.py --score-batch DIR [--ranking-claim] \\
@@ -390,6 +391,14 @@ def cmd_score_batch(batch_dir: str, manifest_path: str, manifest_explicit: bool,
     return 0
 
 
+def resolve_motion(held_out_kind, motion, human_motion, creature_motion):
+    if held_out_kind == "human" and human_motion:
+        return human_motion
+    if held_out_kind == "creature" and creature_motion:
+        return creature_motion
+    return motion or None
+
+
 def cmd_generate_pairs(a, ap, manifest_explicit: bool) -> int:
     if not a.out or not a.runs:
         ap.error("making pairs needs --out and NAME=a.glb,b.glb runs")
@@ -456,8 +465,9 @@ def cmd_generate_pairs(a, ap, manifest_explicit: bool) -> int:
         out = os.path.join(a.out, name)
         seed = str(int(a.seed) + idx) if a.seed.lstrip("-").isdigit() else a.seed
         cmd = [w, "blind", run["left"], run["right"], "--out", out, "--seed", seed, "--top", a.top]
-        if a.motion:
-            cmd += ["--motion", a.motion]
+        motion = resolve_motion(run["held_out_kind"], a.motion, a.human_motion, a.creature_motion)
+        if motion:
+            cmd += ["--motion", motion]
         print(f"== {name}: {' '.join(cmd)}", flush=True)
         r = subprocess.run(cmd)
         rc = rc or r.returncode
@@ -498,7 +508,17 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--seed", default="20261115")
     ap.add_argument("--top", default="6")
-    ap.add_argument("--motion")
+    ap.add_argument("--motion", metavar="PATH", help="fallback motion clip source GLB")
+    ap.add_argument(
+        "--human-motion",
+        metavar="PATH",
+        help="motion clip source GLB for held-out human rigs",
+    )
+    ap.add_argument(
+        "--creature-motion",
+        metavar="PATH",
+        help="motion clip source GLB for held-out creature rigs",
+    )
     ap.add_argument("--score", help="a blind run folder to score instead of making pairs")
     ap.add_argument("--answers", help="judge answers JSON (with --score)")
     ap.add_argument("--key", help="answer key JSON (with --score; default: beside the run)")

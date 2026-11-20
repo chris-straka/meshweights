@@ -184,6 +184,11 @@ What the cast run proved:
   pair's inputs into `<DIR>/run_manifest.json`; with `--ranking-claim`
   it refuses before running `weights` unless every frozen `sha256`
   appears as input `A`.
+- `--human-motion PATH` and `--creature-motion PATH` route `--motion` by
+  `held_out_kind` during pair generation: humans receive `--human-motion`
+  (when set), creatures receive `--creature-motion` (when set, or omit
+  `--motion` to play their own clips when only `--human-motion` is set),
+  and any other case falls back to `--motion PATH` if given.
 - `--score-batch DIR [--ranking-claim]` reads `run_manifest.json`, each
   `<name>.key.json`, and `<name>/verdict.json`; with `--ranking-claim`
   it refuses unless every frozen held-out rig is covered, all blind
