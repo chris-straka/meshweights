@@ -196,6 +196,38 @@ What the cast run proved:
   zero held-out rigs worsen on tears, and a strict majority improve on
   tears.
 
+## Held-out ranking re-measurement (2026-11-19, meshweights-6)
+
+Measured on the 5 frozen held-out rigs (`bench/held_out.json`, fleet data
+set `meshweights-heldout`, never used in the 11-16 cast tuning) with
+`weights fix --motion` (`--human-motion` hero clips on humans, own gait
+clips via `meshweights-5` on creatures), both pre-`meshweights-7` (old
+voxel graph `330e405`, fleet `2c2mp3sz`) and post-`meshweights-7`
+(cut-cell geodesic graph `2d792ac`, fleet `2ustx28k`):
+
+| rig | kind | voxel `fix` clips / poses (%) | cut-cell `fix` clips / poses (%) | blind control | blind planted (tears / eye) |
+|---|---|---|---|---|---|
+| `human_01` | human | 2.58→2.37 / 2.07→1.75 | 2.28→2.28 / 2.07→2.07 | PASS | PASS / PASS (`death@1.00s`) |
+| `human_02` | human | 4.23→4.23 / 3.90→3.90 | 4.15→4.15 / 3.88→3.88 | PASS | PASS / FAIL (`death@1.00s` supine) |
+| `creature_01` | creature | 2.62→1.92 / 4.06→3.10 | 2.59→1.96 / 8.75→3.09 | PASS | PASS / PASS (`trot@0.33s`) |
+| `creature_02` | creature | 3.28→3.28 / 4.93→4.76 | 3.22→3.22 / 5.22→4.85 | PASS | PASS / `cant_tell` (`attack@0.53s` symmetric lunge under mane) |
+| `creature_03` | creature | 0.27→0.00 / 0.22→0.00 | 0.46→0.37 / 0.85→0.46 | PASS | PASS / PASS (`walk@0.00s`) |
+
+- **Never-worse & improvement**: **0 of 5 worse** on both clips and poses
+  under both graphs. Under the cut-cell graph, pose tears improved on
+  **3 of 5** rigs (`4.15% → 2.87%` mean, `-31%`) and clip tears improved
+  on **2 of 5** (`2.54% → 2.40%` mean; `human_01` and `human_02` were
+  already pre-fixed rigs and held with zero regression).
+- **Blind game-camera validity (`2ustx28k`, 30 pairs judged blind before
+  unsealing keys)**: **5/5 controls** passed (`cant_tell`), **5/5 planted
+  swaps** were flagged by tears on `game clips`, and **3/5 planted swaps**
+  were spotted by eye at the 75° / 3.0 m game camera. The two eye misses
+  are concrete checker findings: `human_02` picked a supine `death@1.00s`
+  frame (hard to read at 38% frame height), and `creature_02` picked a
+  symmetric `attack@0.53s` lunge under a thick mane where opposite front
+  limbs move nearly identically (picking an opposite-phase gait frame such
+  as `walk`/`trot` would make planted swaps clearer on maned quadrupeds).
+
 ## Remaining limits
 
 - A claim is drawn at its worst frame as a still. A fault that only
