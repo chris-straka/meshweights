@@ -153,6 +153,24 @@ worsen after `weights fix`, all blind control and planted-swap gates
 pass, and the blind judge agrees with tears on at least 80% of judged
 claims.
 
+#### Real-corpus calibration runs (2026-11-20, `meshweights-1`, fleet `j92vghq2`)
+
+Measured with current `weights` (cut-cell geodesic graph, post-`meshweights-8`
+split verified green with `fix_golden.sh --check` 105/105 on fleet `9avuccsq`)
+across two real creature sets, each judged by a fresh blind visual judge
+before opening answer keys:
+
+1. **Standard dev calibration (12 Quaternius/Khronos artist animals vs 5 bench creatures, poses only — bench refs were rigged `--no-clips`):**
+   - Medians (poses tears %): **Artist `3.83%`** < **Generated before `fix` `4.24%`** → **after `fix` `2.62%`** (`0/5` worse; separation **PASS**). Artist clips median: `2.91%`.
+   - Blind game-camera gates (40 pairs): **`5/5` controls PASS**, **`5/5` planted swaps caught by eye and tears (`planted_ok` + `planted_tears_ok`)**, **`0/30` non-control/non-planted claims visibly distinct** (`cant_tell` on all 30 — the 5 bench refs were already pre-fixed by the creature route, so a second `weights fix` pass produces sub-pixel differences at 75° / 3.0 m).
+   - Overall `creature_calib.py --score` gate: **FAIL** (`total_claims == 0`, cannot establish `>= 80%` claim agreement on already-fixed refs; raw un-fixed creature rigs are needed to generate visible before/after claims).
+2. **Held-out calibration (12 frozen non-Quaternius CC0/CC-BY held-out artists from `skintokens-1` vs 3 frozen held-out creatures from `meshweights-heldout`):**
+   - Medians (**clips** tears %): **Artist `0.47%`** < **Generated before `fix` `2.59%`** → **after `fix` `1.96%`** (`0/3` worse; **5.5x clips separation PASS**).
+   - Medians (**poses** tears %): **Artist `4.92%`** >= **Generated before `fix` `4.54%`** → **after `fix` `1.52%`** (`0/3` worse; **poses separation FAIL**).
+   - Blind game-camera gates (23 pairs): **`3/3` controls PASS**, **`3/3` planted swaps flagged by tears**, **`2/3` planted swaps caught by eye** (`creature_02` missed on a symmetric `attack@0.53s` lunge under a thick mane, matching `docs/blind.md`), **`0/17` claims visibly distinct** (`cant_tell`).
+   - Overall `creature_calib.py --score` gate: **FAIL** (poses separation failed, `creature_02` planted eye miss, `total_claims == 0`).
+   - **Actionable checker finding:** Real-clip tears cleanly separate hand-made non-Quaternius animals (`0.47%` median; `kaiju`, `m2m_dragon`, `m2m_snake`, `m2m_spider`, `octopus_dense`, `whale` all `0.00%`) from generated creatures (`2.59%`), whereas generic 45° poses bend every joint of 55–107 bone artist rigs (`bee_dense` `30.08%`, `shark_dense` `12.44%`, `eagle` `7.39%`, `panda` `7.00%`) blindly and invert the median. Calibrating creature tears reliably requires creature-specific clips/ROM poses and raw (pre-`weights fix`) generated creature inputs.
+
 ## Known limits
 
 - The Blender Studio rigs on the shelf are film rigs: their deform bones
