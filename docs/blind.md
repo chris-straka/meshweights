@@ -169,6 +169,28 @@ What the cast run proved:
      vertices dropped `545 → 191`, `Quaternius UBC male` `p95` `4.00 →
      3.45 cm` (tears `0.20% → 0.00%`).
 
+## Frozen held-out set for ranking claims
+
+`bench/held_out.json` freezes a held-out set of 2 humans (`human_01`,
+`human_02`) and 3 creatures (`creature_01`..`creature_03`) by `id`,
+`kind`, and `sha256` (actual GLB files remain outside the repo).
+`bench/blind_bench.py` enforces the held-out set whenever
+`--ranking-claim` is set:
+
+- `--verify-manifest DIR [--held-out-manifest PATH]` checks that every
+  frozen entry in the manifest matches `<DIR>/<id>.glb` (or a `.glb` in
+  `DIR`) by exact `sha256`.
+- `--out DIR NAME=a.glb,b.glb ... [--ranking-claim]` always hashes each
+  pair's inputs into `<DIR>/run_manifest.json`; with `--ranking-claim`
+  it refuses before running `weights` unless every frozen `sha256`
+  appears as input `A`.
+- `--score-batch DIR [--ranking-claim]` reads `run_manifest.json`, each
+  `<name>.key.json`, and `<name>/verdict.json`; with `--ranking-claim`
+  it refuses unless every frozen held-out rig is covered, all blind
+  validity gates (`control_ok`, `planted_ok`, `planted_tears_ok`) pass,
+  zero held-out rigs worsen on tears, and a strict majority improve on
+  tears.
+
 ## Remaining limits
 
 - A claim is drawn at its worst frame as a still. A fault that only
