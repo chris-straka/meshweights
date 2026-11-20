@@ -142,6 +142,17 @@ rigs reach 4-8 cm (wrong bone) and 2-4 cm (not following), the cast
 So a belt on a fused generated body is not found yet; a modelled-apart
 or named one is.
 
+### Creature calibration (`bench/creature_calib.py`)
+
+`bench/creature_calib.py` calibrates tears on hand-made artist animals
+against generated creatures (before and after `weights fix`) on poses
+and creature-gait clips, and pairs every generated creature's before/after
+at the game camera (`weights blind`). Its `--score` gate passes only when
+artist medians stay below generated medians, zero generated creatures
+worsen after `weights fix`, all blind control and planted-swap gates
+pass, and the blind judge agrees with tears on at least 80% of judged
+claims.
+
 ## Known limits
 
 - The Blender Studio rigs on the shelf are film rigs: their deform bones
