@@ -459,8 +459,8 @@ pub fn to_glb_framed(f: &Fixture, frame: &dyn Fn(usize, &Bone) -> Quat) -> Glb {
         nodes.push(n);
     }
     let ibm: Vec<f32> = globals.iter().flat_map(|g| g.inverse().to_cols_vec().into_iter().map(|x| x as f32)).collect();
-    let bv = glb.append_view(&f32_bytes(&ibm), None);
-    let ibm_acc = glb.push_accessor(json!({"bufferView": bv, "componentType": 5126, "count": nb, "type": "MAT4"}));
+    let bv = glb.append_view(&f32_bytes(&ibm), None).expect("fixture glb");
+    let ibm_acc = glb.push_accessor(json!({"bufferView": bv, "componentType": 5126, "count": nb, "type": "MAT4"})).expect("fixture glb");
 
     let mut meshes = Vec::new();
     // A fixture without a cape (a test shape) writes the body alone.
@@ -476,11 +476,13 @@ pub fn to_glb_framed(f: &Fixture, frame: &dyn Fn(usize, &Bone) -> Quat) -> Glb {
                 hi[k] = hi[k].max(c[k]);
             }
         }
-        let bvp = glb.append_view(&f32_bytes(&p32), Some(34962));
-        let ap =
-            glb.push_accessor(json!({"bufferView": bvp, "componentType": 5126, "count": pos.len(), "type": "VEC3", "min": lo, "max": hi}));
-        let bvn = glb.append_view(&f32_bytes(&n32), Some(34962));
-        let an = glb.push_accessor(json!({"bufferView": bvn, "componentType": 5126, "count": pos.len(), "type": "VEC3"}));
+        let bvp = glb.append_view(&f32_bytes(&p32), Some(34962)).expect("fixture glb");
+        let ap = glb
+            .push_accessor(json!({"bufferView": bvp, "componentType": 5126, "count": pos.len(), "type": "VEC3", "min": lo, "max": hi}))
+            .expect("fixture glb");
+        let bvn = glb.append_view(&f32_bytes(&n32), Some(34962)).expect("fixture glb");
+        let an =
+            glb.push_accessor(json!({"bufferView": bvn, "componentType": 5126, "count": pos.len(), "type": "VEC3"})).expect("fixture glb");
         let mut jb = Vec::new();
         let mut wf = Vec::new();
         for vw in w {
@@ -493,13 +495,17 @@ pub fn to_glb_framed(f: &Fixture, frame: &dyn Fn(usize, &Bone) -> Quat) -> Glb {
                 wf.push(ww as f32);
             }
         }
-        let bvj = glb.append_view(&jb, Some(34962));
-        let aj = glb.push_accessor(json!({"bufferView": bvj, "componentType": 5121, "count": pos.len(), "type": "VEC4"}));
-        let bvw = glb.append_view(&f32_bytes(&wf), Some(34962));
-        let aw = glb.push_accessor(json!({"bufferView": bvw, "componentType": 5126, "count": pos.len(), "type": "VEC4"}));
+        let bvj = glb.append_view(&jb, Some(34962)).expect("fixture glb");
+        let aj =
+            glb.push_accessor(json!({"bufferView": bvj, "componentType": 5121, "count": pos.len(), "type": "VEC4"})).expect("fixture glb");
+        let bvw = glb.append_view(&f32_bytes(&wf), Some(34962)).expect("fixture glb");
+        let aw =
+            glb.push_accessor(json!({"bufferView": bvw, "componentType": 5126, "count": pos.len(), "type": "VEC4"})).expect("fixture glb");
         let idx: Vec<u8> = tris.iter().flat_map(|t| t.iter().flat_map(|i| i.to_le_bytes())).collect();
-        let bvi = glb.append_view(&idx, Some(34963));
-        let ai = glb.push_accessor(json!({"bufferView": bvi, "componentType": 5125, "count": tris.len() * 3, "type": "SCALAR"}));
+        let bvi = glb.append_view(&idx, Some(34963)).expect("fixture glb");
+        let ai = glb
+            .push_accessor(json!({"bufferView": bvi, "componentType": 5125, "count": tris.len() * 3, "type": "SCALAR"}))
+            .expect("fixture glb");
         meshes.push(json!({"name": name, "primitives": [{"attributes": {"POSITION": ap, "NORMAL": an, "JOINTS_0": aj, "WEIGHTS_0": aw}, "indices": ai}]}));
     }
     let body_node = nodes.len();
@@ -516,6 +522,6 @@ pub fn to_glb_framed(f: &Fixture, frame: &dyn Fn(usize, &Bone) -> Quat) -> Glb {
     let roots: Vec<usize> = std::iter::once(arm).chain(body_node..body_node + nm).collect();
     glb.json["scenes"] = json!([{"nodes": roots}]);
     glb.json["scene"] = json!(0);
-    glb.sync_buffer_len();
+    glb.sync_buffer_len().expect("fixture glb");
     glb
 }

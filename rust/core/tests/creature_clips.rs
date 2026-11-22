@@ -132,15 +132,17 @@ fn attach_clips(glb: &mut Glb, clips: &[(&str, f64, &[(usize, Vec3, f64, f64)])]
     for &(name, dur, tracks) in clips {
         let nkeys = 9usize;
         let times: Vec<f32> = (0..nkeys).map(|i| (dur * i as f64 / (nkeys - 1) as f64) as f32).collect();
-        let tv = glb.append_view(&f32_bytes(&times), None);
-        let ta = glb.push_accessor(json!({
-            "bufferView": tv,
-            "componentType": 5126,
-            "count": nkeys,
-            "type": "SCALAR",
-            "min": [times[0]],
-            "max": [times[nkeys - 1]],
-        }));
+        let tv = glb.append_view(&f32_bytes(&times), None).unwrap();
+        let ta = glb
+            .push_accessor(json!({
+                "bufferView": tv,
+                "componentType": 5126,
+                "count": nkeys,
+                "type": "SCALAR",
+                "min": [times[0]],
+                "max": [times[nkeys - 1]],
+            }))
+            .unwrap();
         let mut samplers = Vec::new();
         let mut channels = Vec::new();
         for &(node, axis, peak_deg, phase) in tracks {
@@ -155,13 +157,15 @@ fn attach_clips(glb: &mut Glb, clips: &[(&str, f64, &[(usize, Vec3, f64, f64)])]
                 let q = (rest_q * Quat::from_axis_angle(axis.normalized(), ang)).normalized();
                 vals.extend_from_slice(&[q.x as f32, q.y as f32, q.z as f32, q.w as f32]);
             }
-            let vv = glb.append_view(&f32_bytes(&vals), None);
-            let va = glb.push_accessor(json!({
-                "bufferView": vv,
-                "componentType": 5126,
-                "count": nkeys,
-                "type": "VEC4",
-            }));
+            let vv = glb.append_view(&f32_bytes(&vals), None).unwrap();
+            let va = glb
+                .push_accessor(json!({
+                    "bufferView": vv,
+                    "componentType": 5126,
+                    "count": nkeys,
+                    "type": "VEC4",
+                }))
+                .unwrap();
             let si = samplers.len();
             samplers.push(json!({"input": ta, "interpolation": "LINEAR", "output": va}));
             channels.push(json!({"sampler": si, "target": {"node": node, "path": "rotation"}}));
@@ -169,7 +173,7 @@ fn attach_clips(glb: &mut Glb, clips: &[(&str, f64, &[(usize, Vec3, f64, f64)])]
         anims.push(json!({"name": name, "channels": channels, "samplers": samplers}));
     }
     glb.json["animations"] = json!(anims);
-    glb.sync_buffer_len();
+    glb.sync_buffer_len().unwrap();
 }
 
 /// Procedural clean quadruped facing +Z (`Body::Quadruped`).

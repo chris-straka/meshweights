@@ -26,8 +26,8 @@ fn every_skin_is_read() {
     let ibm0 = skin0["inverseBindMatrices"].as_u64().unwrap() as usize;
     let (_, m) = g.read_f64(ibm0).unwrap();
     let rev: Vec<f32> = (0..nb).rev().flat_map(|j| m[j * 16..j * 16 + 16].iter().map(|&x| x as f32).collect::<Vec<_>>()).collect();
-    let bv = g.append_view(&f32_bytes(&rev), None);
-    let acc = g.push_accessor(json!({"bufferView": bv, "componentType": 5126, "count": nb, "type": "MAT4"}));
+    let bv = g.append_view(&f32_bytes(&rev), None).unwrap();
+    let acc = g.push_accessor(json!({"bufferView": bv, "componentType": 5126, "count": nb, "type": "MAT4"})).unwrap();
     let joints: Vec<u64> = skin0["joints"].as_array().unwrap().iter().rev().map(|x| x.as_u64().unwrap()).collect();
     g.json["skins"].as_array_mut().unwrap().push(json!({"inverseBindMatrices": acc, "joints": joints}));
     let cape_node = g.json["nodes"].as_array().unwrap().iter().position(|n| n["name"] == "Cape").unwrap();
@@ -84,13 +84,15 @@ fn rigid_parts_are_checked_and_ride_their_bone() {
         }
     }
     let tris: [u32; 36] = [0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0, 6, 4, 1, 5, 7, 1, 7, 3];
-    let bvp = g.append_view(&f32_bytes(&pos), Some(34962));
-    let ap = g.push_accessor(
-        json!({"bufferView": bvp, "componentType": 5126, "count": 8, "type": "VEC3", "min": [-0.02,-0.02,-0.02], "max": [0.02,0.02,0.02]}),
-    );
+    let bvp = g.append_view(&f32_bytes(&pos), Some(34962)).unwrap();
+    let ap = g
+        .push_accessor(
+            json!({"bufferView": bvp, "componentType": 5126, "count": 8, "type": "VEC3", "min": [-0.02,-0.02,-0.02], "max": [0.02,0.02,0.02]}),
+        )
+        .unwrap();
     let idx: Vec<u8> = tris.iter().flat_map(|i| i.to_le_bytes()).collect();
-    let bvi = g.append_view(&idx, Some(34963));
-    let ai = g.push_accessor(json!({"bufferView": bvi, "componentType": 5125, "count": 36, "type": "SCALAR"}));
+    let bvi = g.append_view(&idx, Some(34963)).unwrap();
+    let ai = g.push_accessor(json!({"bufferView": bvi, "componentType": 5125, "count": 36, "type": "SCALAR"})).unwrap();
     g.json["meshes"]
         .as_array_mut()
         .unwrap()

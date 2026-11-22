@@ -151,9 +151,29 @@ impl Glb {
         Some((a.get("componentType")?.as_u64()? as u32, a.get("normalized").and_then(Value::as_bool).unwrap_or(false)))
     }
 
+    fn check_mut_schema(&self, need_views: bool, need_accs: bool) -> Result<()> {
+        let obj = self.json.as_object().ok_or_else(|| Error("GLB JSON root is not an object".into()))?;
+        if let Some(bufs) = obj.get("buffers") {
+            let arr = bufs.as_array().ok_or_else(|| Error("GLB JSON buffers is not an array".into()))?;
+            if let Some(b0) = arr.first() {
+                if !b0.is_object() {
+                    return err("GLB JSON buffers[0] is not an object");
+                }
+            }
+        }
+        if need_views && obj.get("bufferViews").is_some_and(|v| !v.is_array()) {
+            return err("GLB JSON bufferViews is not an array");
+        }
+        if need_accs && obj.get("accessors").is_some_and(|v| !v.is_array()) {
+            return err("GLB JSON accessors is not an array");
+        }
+        Ok(())
+    }
+
     /// Appends a tightly packed accessor and returns its index.
     /// `ctype` 5123 (u16) or 5126 (f32).
-    pub fn append_vec4(&mut self, rows: &[[f64; 4]], ctype: u32) -> usize {
+    pub fn append_vec4(&mut self, rows: &[[f64; 4]], ctype: u32) -> Result<usize> {
+        self.check_mut_schema(true, true)?;
         let mut bytes = Vec::with_capacity(rows.len() * 16);
         for row in rows {
             for &v in row {
@@ -165,50 +185,104 @@ impl Glb {
         }
         let off = append_aligned(&mut self.bin, &bytes);
         let len = bytes.len();
-        let obj = self.json.as_object_mut().expect("root object");
-        let bvs = obj.entry("bufferViews").or_insert_with(|| json!([])).as_array_mut().unwrap();
+        let obj = self.json.as_object_mut().ok_or_else(|| Error("GLB JSON root is not an object".into()))?;
+        let bvs = obj
+            .entry("bufferViews")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| Error("GLB JSON bufferViews is not an array".into()))?;
         bvs.push(json!({"buffer": 0, "byteOffset": off, "byteLength": len}));
         let bv = bvs.len() - 1;
-        let accs = obj.entry("accessors").or_insert_with(|| json!([])).as_array_mut().unwrap();
+        let accs = obj
+            .entry("accessors")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| Error("GLB JSON accessors is not an array".into()))?;
         accs.push(json!({"bufferView": bv, "componentType": ctype, "count": rows.len(), "type": "VEC4"}));
         let a = accs.len() - 1;
-        self.sync_buffer_len();
-        a
+        self.sync_buffer_len()?;
+        Ok(a)
     }
 
-    pub fn sync_buffer_len(&mut self) {
+    pub fn sync_buffer_len(&mut self) -> Result<()> {
         let len = self.bin.len();
-        let obj = self.json.as_object_mut().expect("root object");
-        let bufs = obj.entry("buffers").or_insert_with(|| json!([{}])).as_array_mut().unwrap();
+        let obj = self.json.as_object_mut().ok_or_else(|| Error("GLB JSON root is not an object".into()))?;
+        let bufs = obj
+            .entry("buffers")
+            .or_insert_with(|| json!([{}]))
+            .as_array_mut()
+            .ok_or_else(|| Error("GLB JSON buffers is not an array".into()))?;
         if bufs.is_empty() {
             bufs.push(json!({}));
         }
-        bufs[0]["byteLength"] = json!(len);
+        let buf0 = bufs[0].as_object_mut().ok_or_else(|| Error("GLB JSON buffers[0] is not an object".into()))?;
+        buf0.insert("byteLength".into(), json!(len));
+        Ok(())
     }
 
     /// Appends raw bytes as a bufferView (4-byte aligned) and returns its index.
-    pub fn append_view(&mut self, bytes: &[u8], target: Option<u32>) -> usize {
+    pub fn append_view(&mut self, bytes: &[u8], target: Option<u32>) -> Result<usize> {
+        self.check_mut_schema(true, false)?;
         let off = append_aligned(&mut self.bin, bytes);
-        let obj = self.json.as_object_mut().expect("root object");
-        let bvs = obj.entry("bufferViews").or_insert_with(|| json!([])).as_array_mut().unwrap();
+        let obj = self.json.as_object_mut().ok_or_else(|| Error("GLB JSON root is not an object".into()))?;
+        let bvs = obj
+            .entry("bufferViews")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| Error("GLB JSON bufferViews is not an array".into()))?;
         let mut bv = json!({"buffer": 0, "byteOffset": off, "byteLength": bytes.len()});
         if let Some(t) = target {
             bv["target"] = json!(t);
         }
         bvs.push(bv);
         let i = bvs.len() - 1;
-        self.sync_buffer_len();
-        i
+        self.sync_buffer_len()?;
+        Ok(i)
     }
 
-    pub fn push_accessor(&mut self, acc: Value) -> usize {
-        let obj = self.json.as_object_mut().expect("root object");
-        let accs = obj.entry("accessors").or_insert_with(|| json!([])).as_array_mut().unwrap();
+    pub fn push_accessor(&mut self, acc: Value) -> Result<usize> {
+        let obj = self.json.as_object_mut().ok_or_else(|| Error("GLB JSON root is not an object".into()))?;
+        let accs = obj
+            .entry("accessors")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| Error("GLB JSON accessors is not an array".into()))?;
         accs.push(acc);
-        accs.len() - 1
+        Ok(accs.len() - 1)
     }
 }
 
 pub fn f32_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_json_structures_return_errors_instead_of_panicking() {
+        for bad in [
+            json!(123),
+            json!({"bufferViews": "not-an-array"}),
+            json!({"accessors": {}}),
+            json!({"buffers": "not-an-array"}),
+            json!({"buffers": [42]}),
+        ] {
+            let mut g_vec4 = Glb { json: bad.clone(), bin: vec![], json_raw: None };
+            assert!(g_vec4.append_vec4(&[[0.0, 0.0, 0.0, 1.0]], 5126).is_err(), "expected error on append_vec4 for {bad}");
+            assert!(g_vec4.bin.is_empty(), "append_vec4 leaked bytes into bin for {bad}");
+
+            let mut g_view = Glb { json: bad.clone(), bin: vec![], json_raw: None };
+            let r_view = g_view.append_view(&[1, 2, 3, 4], None);
+            if r_view.is_err() {
+                assert!(g_view.bin.is_empty(), "append_view leaked bytes into bin for {bad}");
+            }
+
+            let mut g_sync = Glb { json: bad.clone(), bin: vec![], json_raw: None };
+            let _ = g_sync.sync_buffer_len();
+            let mut g_acc = Glb { json: bad.clone(), bin: vec![], json_raw: None };
+            let _ = g_acc.push_accessor(json!({}));
+        }
+    }
 }

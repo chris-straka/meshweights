@@ -1091,8 +1091,8 @@ impl Model {
                 ibm.extend(m.to_cols_vec().into_iter().map(|x| x as f32));
             }
             let count = info.joints.len() + add.len();
-            let bv = glb.append_view(&crate::glb::f32_bytes(&ibm), None);
-            let acc = glb.push_accessor(json!({"bufferView": bv, "componentType": 5126, "count": count, "type": "MAT4"}));
+            let bv = glb.append_view(&crate::glb::f32_bytes(&ibm), None)?;
+            let acc = glb.push_accessor(json!({"bufferView": bv, "componentType": 5126, "count": count, "type": "MAT4"}))?;
             let skin = &mut glb.json["skins"][info.index];
             if let Some(js) = skin.get_mut("joints").and_then(Value::as_array_mut) {
                 for &j in add {
@@ -1154,7 +1154,7 @@ impl Model {
                 } else {
                     rows
                 };
-                let a = glb.append_vec4(&rows, ct);
+                let a = glb.append_vec4(&rows, ct)?;
                 written.insert(a, rows);
                 Ok(a)
             };
@@ -1170,7 +1170,7 @@ impl Model {
                 }
             }
         }
-        glb.sync_buffer_len();
+        glb.sync_buffer_len()?;
         Ok(glb)
     }
 }
