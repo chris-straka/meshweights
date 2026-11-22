@@ -2,7 +2,10 @@
 //! swapped mirrored limb must tear, and a pair sheet must show both
 //! rigs whole at the same frame with only LEFT and RIGHT on it.
 
-use weightforge_core::blind::{BlindSide, GameCamera, cell_image, claim_view, frame_share, game_fit, pair_sheet, planted_bad};
+use weightforge_core::blind::{
+    BlindSide, GameCamera, cell_image, claim_view, frame_share, game_camera_from_path, game_fit, game_frame_share_from_path, pair_sheet,
+    planted_bad,
+};
 use weightforge_core::fixtures;
 use weightforge_core::glb::Glb;
 use weightforge_core::metrics::{Ctx, CtxOpts, evaluate};
@@ -70,4 +73,17 @@ fn the_planted_swap_tears_and_the_pair_is_whole_body() {
     // of the body's pixels is (0.38 / 0.70)^2 of what it was.
     let k = (share / 0.704).powi(2);
     assert!(diff as f64 > 2000.0 * k, "{diff} <= {}", 2000.0 * k);
+}
+
+#[test]
+fn explicit_metrics_path_reads_camera_without_game_checkout() {
+    let dir = std::env::temp_dir().join(format!("wf_blind_cam_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("metrics.ron");
+    std::fs::write(&path, "// camera test\n{\"camera\": {\"distance\": 3.0, \"fov\": 75.0}}\n").unwrap();
+    let cam = game_camera_from_path(&path).unwrap();
+    assert_eq!(cam, GameCamera { distance_m: 3.0, fov_deg: 75.0 });
+    assert!((game_frame_share_from_path(&path).unwrap() - 0.380).abs() < 0.005);
+    assert!(game_camera_from_path(&dir.join("missing.ron")).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

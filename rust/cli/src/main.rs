@@ -28,11 +28,11 @@ USAGE:
                   [--poses-b rom_b.ron]
   weights probe   <in.glb> --out <dir> [--poses rom.ron] [--number-from N]
   weights blind   <a.glb> <b.glb> --out <dir> [--motion hero.glb] [--motion-clips ...]
-                  [--seed N] [--top N] [--key key.json] [--camera follow|talk] [--through]
+                  [--seed N] [--top N] [--key key.json] [--camera follow|talk]
+                  [--metrics metrics.ron] [--through]
                   (same-frame blind pairs per claim, at the game camera: the
-                  follow camera's lens and distance from the game's own
-                  metrics.ron, $HLH_METRICS or ~/Games/hlh/bevy/assets/data;
-                  --through: limbs passing through each other are claims too)
+                  follow camera's lens and distance from --metrics, $METRICS_FILE,
+                  or $HLH_METRICS; --through: limbs passing through each other are claims too)
   weights blind-score <dir> --answers answers.json [--key key.json]
                   (lay a judge's answers against tears and the old score)
   weights closeness <pro.glb> <test.glb> [--motion hero.glb] [--json]
@@ -197,6 +197,7 @@ const VALUED: &[&str] = &[
     "--top",
     "--seed",
     "--camera",
+    "--metrics",
     "--answers",
     "--key",
 ];
@@ -609,9 +610,13 @@ fn cmd_blind(a: &Args) -> ExitCode {
         Some(Some(c)) => c,
         Some(None) => return fail("--camera is follow or talk"),
     };
-    // The follow camera's lens and distance, from the game's own numbers.
+    // The follow camera's lens and distance, from --metrics or $METRICS_FILE / $HLH_METRICS.
     let share = if camera == wf::blind::Camera::Follow {
-        match wf::blind::game_frame_share() {
+        let res = match a.get("--metrics") {
+            Some(p) => wf::blind::game_frame_share_from_path(Path::new(p)),
+            None => wf::blind::game_frame_share(),
+        };
+        match res {
             Ok(s) => s,
             Err(e) => return fail(e),
         }
@@ -1491,7 +1496,7 @@ fn flags_of(cmd: &str) -> Option<Vec<&'static str>> {
         "check" => &["--json", "--vertex-json", "--motion", "--motion-clips"],
         "sheet" => &["--out", "--cols"],
         "probe" => &["--out", "--number-from"],
-        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key", "--camera", "--through"],
+        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key", "--camera", "--metrics", "--through"],
         "blind-score" => &["--answers", "--key"],
         "show" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
         "before-after" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],

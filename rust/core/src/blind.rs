@@ -39,13 +39,10 @@ use crate::skin::lbs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The game's follow camera, as the game itself publishes it: the
-/// `camera` block of HLH's `bevy/assets/data/metrics.ron`, written from
-/// the code that sets it (`metrics::camera_now`; distance behind the point
-/// it looks at, metres, and how tall its view is, degrees). Read from
-/// `$HLH_METRICS`, else `~/Games/hlh/bevy/assets/data/metrics.ron`; no copy
-/// of the numbers is kept here (2026-11-19: a copy said 45 degrees while
-/// the game draws 75, so every blind picture sat 1.6 times too close).
+/// The game's follow camera, read from a `metrics.ron` camera config
+/// (`distance` behind the focus point in metres, vertical `fov` in
+/// degrees). Supplied via `--metrics <path>` or `METRICS_FILE` /
+/// `HLH_METRICS` (no hardcoded game checkout path fallback).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GameCamera {
     pub distance_m: f64,
@@ -61,25 +58,29 @@ pub fn parse_game_camera(text: &str) -> Result<GameCamera, String> {
     Ok(GameCamera { distance_m: num("distance")?, fov_deg: num("fov")? })
 }
 
-/// Where the game's metrics.ron is.
-pub fn game_metrics_path() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("HLH_METRICS") {
-        return p.into();
+/// Explicit metrics.ron path from `METRICS_FILE` or `HLH_METRICS`, if set.
+pub fn game_metrics_path() -> Option<std::path::PathBuf> {
+    for key in ["METRICS_FILE", "HLH_METRICS"] {
+        if let Some(p) = std::env::var_os(key) {
+            if !p.is_empty() {
+                return Some(p.into());
+            }
+        }
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::Path::new(&home).join("Games/hlh/bevy/assets/data/metrics.ron")
+    None
 }
 
-/// The game's follow camera, read once.
+/// Reads the follow camera from an explicit `metrics.ron` file.
+pub fn game_camera_from_path(path: &std::path::Path) -> Result<GameCamera, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("the game's camera: cannot read {} ({e})", path.display()))?;
+    parse_game_camera(&text)
+}
+
+/// The game's follow camera from `METRICS_FILE` or `HLH_METRICS`.
 pub fn game_camera() -> Result<GameCamera, String> {
-    static CAM: std::sync::OnceLock<Result<GameCamera, String>> = std::sync::OnceLock::new();
-    CAM.get_or_init(|| {
-        let p = game_metrics_path();
-        let text =
-            std::fs::read_to_string(&p).map_err(|e| format!("the game's camera: cannot read {} ({e}); set HLH_METRICS", p.display()))?;
-        parse_game_camera(&text)
-    })
-    .clone()
+    let p = game_metrics_path()
+        .ok_or_else(|| "the game's camera: pass --metrics <metrics.ron> (or set METRICS_FILE / HLH_METRICS)".to_string())?;
+    game_camera_from_path(&p)
 }
 
 /// How much of the frame height a 1.75 m body fills at a camera:
@@ -88,8 +89,13 @@ pub fn frame_share(cam: GameCamera) -> f64 {
     owner::BODY_M / (2.0 * cam.distance_m * (cam.fov_deg * 0.5).to_radians().tan())
 }
 
+/// How much of the frame height a 1.75 m body fills at an explicit `metrics.ron`.
+pub fn game_frame_share_from_path(path: &std::path::Path) -> Result<f64, String> {
+    game_camera_from_path(path).map(frame_share)
+}
+
 /// How much of the frame height a 1.75 m body fills at the game's follow
-/// camera (0.38 at the game's 3.0 m and 75 degrees).
+/// camera (0.38 at 3.0 m and 75 degrees).
 pub fn game_frame_share() -> Result<f64, String> {
     game_camera().map(frame_share)
 }

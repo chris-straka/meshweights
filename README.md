@@ -41,7 +41,7 @@ Pure Rust, permissive deps only (serde, serde_json, ron, png, rayon).
                                                     # other way the headline retires it): worst poses
                                                     # first, close-ups in clay, a loop for each pose
     weights probe   hero.glb --out cases/           # unmarked loops for a person to judge
-    weights blind   a.glb b.glb --out pairs/ [--motion hero.glb] [--seed N] [--top N] [--camera follow|talk]
+    weights blind   a.glb b.glb --out pairs/ [--motion hero.glb] [--seed N] [--top N] [--camera follow|talk] [--metrics metrics.ron]
                                                     # same-frame blind pairs per claim at the
                                                     # game camera, plus a can't-tell control and
                                                     # a planted bad case; key beside the folder

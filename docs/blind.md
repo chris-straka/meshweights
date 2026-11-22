@@ -14,10 +14,9 @@ them, else on the range-of-motion poses):
 
 - both rigs at **the same frame**, from **the same camera**, in the
   character's own paint, nothing marked, no rig named, no score shown;
-- the camera is **the game camera**: HLH's follow camera, its lens and
-  distance read from the game's own numbers (the `camera` block of
-  `bevy/assets/data/metrics.ron`, `$HLH_METRICS` to point elsewhere;
-  3.0 m and a 75° view on 2026-11-19), so a 1.75 m body fills about
+- the camera is **the game camera**: the follow camera, its lens and
+  distance read from `--metrics <metrics.ron>` (or `$METRICS_FILE` /
+  `$HLH_METRICS`; 3.0 m and a 75° view on 2026-11-19), so a 1.75 m body fills about
   38% of the frame height (45° was assumed until 2026-11-19, 70%). The heading is the follow-camera heading
   that shows the claim best (the game camera orbits as the player
   turns); the framing never closes in on the fault. A fault too small

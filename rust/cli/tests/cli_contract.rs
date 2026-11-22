@@ -147,7 +147,19 @@ fn blind_pairs_and_scoring() {
     let a = d.join("mannequin_bleed.glb");
     let b = d.join("mannequin_cape_wrong_bone.glb");
     let out = d.join("pairs");
-    let (c, stdout, _) = run(&["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out.to_str().unwrap(), "--top", "4"]);
+    let metrics = d.join("metrics.ron");
+    std::fs::write(&metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
+    let (c, stdout, _) = run(&[
+        "blind",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--metrics",
+        metrics.to_str().unwrap(),
+        "--top",
+        "4",
+    ]);
     assert_eq!(c, 0, "{stdout}");
     let pubdoc: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("pairs.json")).unwrap()).unwrap();
     let pairs = pubdoc["pairs"].as_array().unwrap();
@@ -203,6 +215,55 @@ fn blind_pairs_and_scoring() {
     // Unknown flags are usage errors here too.
     assert_eq!(run(&["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out.to_str().unwrap(), "--seed", "x"]).0, 2);
     assert_eq!(run(&["blind-score", out.to_str().unwrap()]).0, 2);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn blind_follow_requires_explicit_metrics_without_hlh_fallback() {
+    let d = tmp("blind_no_fallback");
+    let ds = d.to_str().unwrap();
+    assert_eq!(run(&["fixture", "all", "--out", ds]).0, 0);
+    let a = d.join("mannequin_bleed.glb");
+    let b = d.join("mannequin_cape_wrong_bone.glb");
+    // Even if $HOME contains Games/hlh/bevy/assets/data/metrics.ron, follow blind
+    // must refuse unless --metrics (or HLH_METRICS/METRICS_FILE) is explicitly provided.
+    let fake_home = d.join("home");
+    let fake_hlh_metrics = fake_home.join("Games/hlh/bevy/assets/data/metrics.ron");
+    std::fs::create_dir_all(fake_hlh_metrics.parent().unwrap()).unwrap();
+    std::fs::write(&fake_hlh_metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
+
+    let out_missing = d.join("pairs_missing");
+    let o = Command::new(bin())
+        .args(["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out_missing.to_str().unwrap(), "--top", "1"])
+        .env("HOME", &fake_home)
+        .env_remove("HLH_METRICS")
+        .env_remove("METRICS_FILE")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2), "expected exit 2 without --metrics; stderr:\n{}", String::from_utf8_lossy(&o.stderr));
+
+    // Explicit --metrics <path> must succeed with no env vars set.
+    let explicit_metrics = d.join("cam_metrics.ron");
+    std::fs::write(&explicit_metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
+    let out_ok = d.join("pairs_ok");
+    let o2 = Command::new(bin())
+        .args([
+            "blind",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "--out",
+            out_ok.to_str().unwrap(),
+            "--metrics",
+            explicit_metrics.to_str().unwrap(),
+            "--top",
+            "1",
+        ])
+        .env("HOME", &fake_home)
+        .env_remove("HLH_METRICS")
+        .env_remove("METRICS_FILE")
+        .output()
+        .unwrap();
+    assert_eq!(o2.status.code(), Some(0), "explicit --metrics failed:\n{}", String::from_utf8_lossy(&o2.stderr));
     let _ = std::fs::remove_dir_all(&d);
 }
 
