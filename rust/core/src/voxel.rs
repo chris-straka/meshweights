@@ -1134,16 +1134,49 @@ impl CutCellGraph {
             })
             .collect();
 
-        // Only thin-part vertices (no 2x2x2 unobstructed interior corner) and
-        // their adjacent junction vertices enter the Dijkstra graph; thick body
-        // regions remain 100% pure volumetric cut-cell grid (density-invariant).
-        let has_2x2x2: Vec<bool> = v_attach.iter().map(|x| !x.1.is_empty()).collect();
-        let mut need_graph: Vec<bool> = has_2x2x2.iter().map(|&h| !h).collect();
-        for &[u, v] in &model.edges {
-            if !has_2x2x2[u as usize] || !has_2x2x2[v as usize] {
-                need_graph[u as usize] = true;
-                need_graph[v as usize] = true;
+        // Connect interior volumetric pockets across any surface edge whose endpoints'
+        // unobstructed 2x2x2 interior samples fall in disjoint volumetric components.
+        fn find_root(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
             }
+            x
+        }
+        let mut parent: Vec<usize> = (0..n_int).collect();
+        for list in &slice_edges {
+            for &(u, v, _) in list {
+                let ru = find_root(&mut parent, u as usize);
+                let rv = find_root(&mut parent, v as usize);
+                if ru != rv {
+                    parent[rv] = ru;
+                }
+            }
+        }
+        let int_comp: Vec<usize> = (0..n_int).map(|i| find_root(&mut parent, i)).collect();
+
+        // Thin-part vertices (no 2x2x2 interior corner), vertices bridging severed
+        // volumetric pockets, and their junction neighbors enter the surface graph;
+        // thick body regions stay 100% pure volumetric grid (density-invariant).
+        let has_2x2x2: Vec<bool> = v_attach.iter().map(|x| !x.1.is_empty()).collect();
+        let bridge_edges: Vec<[u32; 2]> = model
+            .edges
+            .iter()
+            .copied()
+            .filter(|&[u, v]| {
+                let (ui, vi) = (u as usize, v as usize);
+                if !has_2x2x2[ui] || !has_2x2x2[vi] {
+                    return true;
+                }
+                let su = &v_attach[ui].1;
+                let sv = &v_attach[vi].1;
+                !su.iter().any(|&(nu, _, _)| sv.iter().any(|&(nv_node, _, _)| int_comp[nu as usize] == int_comp[nv_node as usize]))
+            })
+            .collect();
+        let mut need_graph: Vec<bool> = has_2x2x2.iter().map(|&h| !h).collect();
+        for &[u, v] in &bridge_edges {
+            need_graph[u as usize] = true;
+            need_graph[v as usize] = true;
         }
 
         // Assemble deterministic CSR adjacency.
@@ -1164,11 +1197,9 @@ impl CutCellGraph {
                 deg[u as usize] += 1;
             }
         }
-        for &[u, v] in &model.edges {
-            if !has_2x2x2[u as usize] || !has_2x2x2[v as usize] {
-                deg[n_int + u as usize] += 1;
-                deg[n_int + v as usize] += 1;
-            }
+        for &[u, v] in &bridge_edges {
+            deg[n_int + u as usize] += 1;
+            deg[n_int + v as usize] += 1;
         }
         let mut offs = vec![0u32; n_nodes + 1];
         for i in 0..n_nodes {
@@ -1203,13 +1234,27 @@ impl CutCellGraph {
             }
             v_sample.push(samples);
         }
-        for &[u, v] in &model.edges {
-            if !has_2x2x2[u as usize] || !has_2x2x2[v as usize] {
-                let len = (model.rest[u as usize] - model.rest[v as usize]).len() as f32;
-                push_edge(n_int + u as usize, n_int + v as usize, len);
-            }
+        for &[u, v] in &bridge_edges {
+            let len = (model.rest[u as usize] - model.rest[v as usize]).len() as f32;
+            push_edge(n_int + u as usize, n_int + v as usize, len);
         }
         CutCellGraph { n_int, grid_to_node, int_pos, offs, dst, w, v_sample }
+    }
+}
+
+fn push_vert_seed(graph: &CutCellGraph, seeds: &mut Vec<(usize, f32)>, vi: usize, d: f32) {
+    let vn = graph.n_int + vi;
+    let mut added = false;
+    if graph.offs[vn] < graph.offs[vn + 1] {
+        seeds.push((vn, d));
+        added = true;
+    }
+    for &(node, len, _) in &graph.v_sample[vi] {
+        seeds.push((node as usize, d + len));
+        added = true;
+    }
+    if !added {
+        seeds.push((vn, d));
     }
 }
 
@@ -1279,7 +1324,7 @@ fn bone_seeds(
                     if dp <= 2.0 * g.h {
                         for &vi in &tris[ti] {
                             let d = (dp + (pos[vi as usize] - hit_pos).len()) as f32;
-                            seeds.push((graph.n_int + vi as usize, d));
+                            push_vert_seed(graph, &mut seeds, vi as usize, d);
                         }
                     }
                 }
@@ -1303,7 +1348,7 @@ fn bone_seeds(
                                 let pv = pos[vi as usize];
                                 if (pv - p).len2() <= r2_thin && !tri_grid.seg_hits_any(p, pv, pos, tris, Some(vi)) {
                                     let d = segment_distance(pv, a, b).1 as f32;
-                                    seeds.push((graph.n_int + vi as usize, d));
+                                    push_vert_seed(graph, &mut seeds, vi as usize, d);
                                 }
                             }
                         }
@@ -1331,7 +1376,11 @@ fn bone_seeds(
             }
         }
         if best.1 != usize::MAX {
-            seeds.push((best.1, best.0 as f32));
+            if best.1 >= graph.n_int {
+                push_vert_seed(graph, &mut seeds, best.1 - graph.n_int, best.0 as f32);
+            } else {
+                seeds.push((best.1, best.0 as f32));
+            }
         }
     }
 
@@ -1424,4 +1473,110 @@ pub fn geodesics(model: &Model, res: usize, joints: &[usize]) -> Geo {
         });
     }
     Geo { near, cap, res, solid }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::{Bone, Fixture, to_glb};
+
+    fn grid_vid(
+        vmap: &mut std::collections::BTreeMap<(usize, usize, usize), u32>,
+        pos: &mut Vec<Vec3>,
+        lo: f64,
+        step: f64,
+        ix: usize,
+        iy: usize,
+        iz: usize,
+    ) -> u32 {
+        *vmap.entry((ix, iy, iz)).or_insert_with(|| {
+            let id = pos.len() as u32;
+            pos.push(v3(lo + ix as f64 * step, lo + iy as f64 * step, lo + iz as f64 * step));
+            id
+        })
+    }
+
+    fn add_outward_quad(pos: &[Vec3], tris: &mut Vec<[u32; 3]>, a: u32, b: u32, c: u32, d: u32) {
+        let ctr = (pos[a as usize] + pos[b as usize] + pos[c as usize] + pos[d as usize]) * 0.25;
+        let nrm = (pos[b as usize] - pos[a as usize]).cross(pos[c as usize] - pos[a as usize]);
+        if nrm.dot(ctr) >= 0.0 {
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        } else {
+            tris.push([a, c, b]);
+            tris.push([a, d, c]);
+        }
+    }
+
+    #[test]
+    fn outside_bone_seed_on_degree0_surface_vertex_reaches_interior() {
+        // Subdivided watertight cube [-0.3, 0.3]^3 so surface vertices with valid 2x2x2 interior
+        // corners have `need_graph == false` (degree-0 `n_int + v` nodes) and rely on `v_sample`.
+        let n = 4usize;
+        let lo = -0.3f64;
+        let step = 0.6 / n as f64;
+        let mut pos = Vec::<Vec3>::new();
+        let mut vmap = std::collections::BTreeMap::<(usize, usize, usize), u32>::new();
+        let mut tris = Vec::<[u32; 3]>::new();
+        for j in 0..n {
+            for i in 0..n {
+                for &(k, x_face, y_face) in
+                    &[(0usize, false, false), (n, false, false), (0, true, false), (n, true, false), (0, false, true), (n, false, true)]
+                {
+                    let (a, b, c, d) = if x_face {
+                        (
+                            grid_vid(&mut vmap, &mut pos, lo, step, i, k, j),
+                            grid_vid(&mut vmap, &mut pos, lo, step, i + 1, k, j),
+                            grid_vid(&mut vmap, &mut pos, lo, step, i + 1, k, j + 1),
+                            grid_vid(&mut vmap, &mut pos, lo, step, i, k, j + 1),
+                        )
+                    } else if y_face {
+                        (
+                            grid_vid(&mut vmap, &mut pos, lo, step, k, i, j),
+                            grid_vid(&mut vmap, &mut pos, lo, step, k, i + 1, j),
+                            grid_vid(&mut vmap, &mut pos, lo, step, k, i + 1, j + 1),
+                            grid_vid(&mut vmap, &mut pos, lo, step, k, i, j + 1),
+                        )
+                    } else {
+                        (
+                            grid_vid(&mut vmap, &mut pos, lo, step, i, j, k),
+                            grid_vid(&mut vmap, &mut pos, lo, step, i + 1, j, k),
+                            grid_vid(&mut vmap, &mut pos, lo, step, i + 1, j + 1, k),
+                            grid_vid(&mut vmap, &mut pos, lo, step, i, j + 1, k),
+                        )
+                    };
+                    add_outward_quad(&pos, &mut tris, a, b, c, d);
+                }
+            }
+        }
+        let bones = vec![
+            Bone { name: "root", parent: None, head: v3(0.0, 0.0, 0.32), tail: v3(0.0, 0.0, 0.38) },
+            Bone { name: "tip", parent: Some(0), head: v3(0.0, 0.0, 0.38), tail: v3(0.0, 0.0, 0.42) },
+        ];
+        let body_w = vec![vec![(0u32, 1.0f64)]; pos.len()];
+        let f = Fixture { bones, body_pos: pos, body_tris: tris, cape_pos: Vec::new(), cape_tris: Vec::new(), body_w, cape_w: Vec::new() };
+        let m = Model::from_glb(to_glb(&f)).unwrap();
+        let center_v = m.rest.iter().position(|p| p.x.abs() < 1e-6 && p.y.abs() < 1e-6 && (p.z - 0.3).abs() < 1e-6).unwrap();
+
+        let (g, _, ray_data, shell) = voxelize_internal(&m.rest, &m.tris, 16, None, true);
+        let tri_grid = TriGrid::build(&g, &m.rest, &m.tris);
+        let vert_grid = VertGrid::build(&g, &m.rest);
+        let graph = CutCellGraph::build(&g, &m, &ray_data, &tri_grid);
+        let vn = graph.n_int + center_v;
+        assert_eq!(graph.offs[vn], graph.offs[vn + 1], "face-center vertex should be degree-0 in vertex graph");
+        assert!(!graph.v_sample[center_v].is_empty(), "face-center vertex must have unobstructed 2x2x2 samples");
+        let seeds = bone_seeds(&g, &graph, &tri_grid, &vert_grid, &m.rest, &m.tris, &shell, m.skel.head[0], m.skel.tail[0]);
+        assert!(seeds.iter().any(|&(node, _)| node < graph.n_int), "push_vert_seed must seed interior nodes");
+
+        let geo = geodesics(&m, 16, &[0]);
+        let mut reachable = 0usize;
+        for (v, p) in m.rest.iter().enumerate() {
+            if p.z > 0.29 && v != center_v {
+                let d = geo.dist(v, 0);
+                assert!(d < geo.cap * 0.9, "neighbor {v} at {p:?} stayed unreachable (d={d}, cap={})", geo.cap);
+                reachable += 1;
+            }
+        }
+        assert!(reachable >= 8);
+    }
 }
