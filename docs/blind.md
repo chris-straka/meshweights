@@ -33,11 +33,12 @@ them, else on the range-of-motion poses):
   unplanted side, and tears must flag the planted copy, or the run
   fails).
 
-The judged folder (`pair_NN.png`, `pair_NN_left.png`,
-`pair_NN_right.png`, `pairs.json`) names no rig and holds no answers.
-The key (`<dir>.key.json`, beside the folder, never in it) records
-the sides, each claim's torn skin on each rig, both tears totals and
-both 0-100 scores. `bench/blind_bench.py` drives runs of pairs.
+The judged folder (`pair-NN.png`, `pair-NN-left.png`,
+`pair-NN-right.png`, `judge.json`, assembled via `gk blind make`) names
+no rig and holds no answers. The key (`<dir>.key.json`, beside the
+folder, never in it) records the sides, each claim's torn skin on each
+rig, both tears totals and both 0-100 scores. `bench/blind_bench.py`
+drives runs of pairs.
 
 ## Scoring, and retiring the score
 

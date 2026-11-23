@@ -132,10 +132,9 @@ fn skintokens_candidate_is_scored() {
 }
 
 /// Blind pairs: one per claim plus a can't-tell control and a planted
-/// bad case, the key outside the judged folder, and `blind-score`
-/// retiring the old score only where the judge and tears agree
-/// against it. The test reads the key (it is not the judge) and
-/// answers as a perfect judge would.
+/// bad case delegated to `gk blind make` / `gk blind score`, the key
+/// outside the judged folder, and `blind-score` retiring the old score
+/// only where the judge and tears agree against it.
 #[test]
 fn blind_pairs_and_scoring() {
     let d = tmp("blind");
@@ -149,38 +148,152 @@ fn blind_pairs_and_scoring() {
     let out = d.join("pairs");
     let metrics = d.join("metrics.ron");
     std::fs::write(&metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
-    let (c, stdout, _) = run(&[
-        "blind",
-        a.to_str().unwrap(),
-        b.to_str().unwrap(),
-        "--out",
-        out.to_str().unwrap(),
-        "--metrics",
-        metrics.to_str().unwrap(),
-        "--top",
-        "4",
-    ]);
-    assert_eq!(c, 0, "{stdout}");
-    let pubdoc: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("pairs.json")).unwrap()).unwrap();
+    // Mock `gk blind make|score` so single-repo CI runs cleanly while verifying delegation.
+    let gk_log = d.join("gk.log");
+    let fake_gk = d.join("gk");
+    std::fs::write(
+        &fake_gk,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, shutil, sys
+open({:?}, "a").write(" ".join(sys.argv[1:]) + "\n")
+assert sys.argv[1] == "blind", sys.argv
+sub = sys.argv[2]
+if sub == "make":
+    a_dir = sys.argv[sys.argv.index("--a") + 1]
+    b_dir = sys.argv[sys.argv.index("--b") + 1]
+    out_dir = sys.argv[sys.argv.index("--out") + 1]
+    planted = sys.argv[sys.argv.index("--planted") + 1]
+    seed = int(sys.argv[sys.argv.index("--seed") + 1])
+    q = sys.argv[sys.argv.index("--question") + 1]
+    os.makedirs(out_dir, exist_ok=True)
+    imgs = sorted(f for f in os.listdir(a_dir) if f.endswith(".png"))
+    pub, key = [], []
+    n = 0
+    for name in imgs:
+        n += 1
+        pid = f"pair-{{n:02d}}"
+        shutil.copyfile(os.path.join(a_dir, name), os.path.join(out_dir, f"{{pid}}-left.png"))
+        shutil.copyfile(os.path.join(b_dir, name), os.path.join(out_dir, f"{{pid}}-right.png"))
+        shutil.copyfile(os.path.join(a_dir, name), os.path.join(out_dir, f"{{pid}}.png"))
+        pub.append({{"id": pid, "left": f"{{pid}}-left.png", "right": f"{{pid}}-right.png", "sheet": f"{{pid}}.png"}})
+        key.append({{"id": pid, "kind": "claim", "claim": os.path.splitext(name)[0], "left": "a", "rmse": 12.0}})
+    n += 1
+    pid = f"pair-{{n:02d}}"
+    shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}-left.png"))
+    shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}-right.png"))
+    shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}.png"))
+    pub.append({{"id": pid, "left": f"{{pid}}-left.png", "right": f"{{pid}}-right.png", "sheet": f"{{pid}}.png"}})
+    key.append({{"id": pid, "kind": "control", "claim": os.path.splitext(imgs[0])[0] + " (control)", "left": "a", "rmse": 0.0}})
+    n += 1
+    pid = f"pair-{{n:02d}}"
+    shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}-left.png"))
+    shutil.copyfile(planted, os.path.join(out_dir, f"{{pid}}-right.png"))
+    shutil.copyfile(planted, os.path.join(out_dir, f"{{pid}}.png"))
+    pub.append({{"id": pid, "left": f"{{pid}}-left.png", "right": f"{{pid}}-right.png", "sheet": f"{{pid}}.png"}})
+    key.append({{"id": pid, "kind": "planted", "claim": os.path.splitext(imgs[0])[0] + " (planted)", "left": "a", "rmse": 45.0}})
+    json.dump({{"version": 1, "question": q, "answers": "one of left | right | cant_tell per pair", "pairs": pub}}, open(os.path.join(out_dir, "judge.json"), "w"))
+    json.dump({{"version": 1, "seed": seed, "question": q, "pairs": key}}, open(out_dir + ".key.json", "w"))
+    sys.exit(0)
+if sub == "score":
+    out_dir = sys.argv[3]
+    ans_path = sys.argv[sys.argv.index("--answers") + 1]
+    key_path = sys.argv[sys.argv.index("--key") + 1] if "--key" in sys.argv else out_dir + ".key.json"
+    ans = json.load(open(ans_path))
+    key = json.load(open(key_path))
+    ctrl_ok, plant_ok = True, True
+    a_wins, b_wins, cant = 0, 0, 0
+    rows = []
+    for p in key["pairs"]:
+        av = ans.get(p["id"], "cant_tell")
+        if p["kind"] == "control":
+            ctrl_ok = ctrl_ok and (av == "cant_tell")
+            w = "cant_tell"
+        elif p["kind"] == "planted":
+            want = "left" if p["left"] == "a" else "right"
+            plant_ok = plant_ok and (av == want)
+            w = "a" if av == want else "b"
+        else:
+            w = p["left"] if av == "left" else ("b" if p["left"] == "a" and av == "right" else ("a" if av == "right" else "cant_tell"))
+            if w == "a": a_wins += 1
+            elif w == "b": b_wins += 1
+            else: cant += 1
+        rows.append({{"pair": p["id"], "kind": p["kind"], "claim": p["claim"], "answer": av, "winner": w}})
+    v = {{"version": 1, "pass": ctrl_ok and plant_ok, "control_ok": ctrl_ok, "planted_ok": plant_ok, "claims": {{"a_wins": a_wins, "b_wins": b_wins, "cant_tell": cant}}, "pairs": rows}}
+    json.dump(v, open(os.path.join(out_dir, "verdict.json"), "w"))
+    print(json.dumps(v))
+    sys.exit(0 if v["pass"] else 1)
+sys.exit(2)
+"#,
+            gk_log.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("+x").arg(&fake_gk).status().unwrap();
+
+    // Missing gk fails loudly with exit 2.
+    let o_missing_gk = Command::new(bin())
+        .args([
+            "blind",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "--out",
+            d.join("no_gk").to_str().unwrap(),
+            "--metrics",
+            metrics.to_str().unwrap(),
+            "--top",
+            "2",
+        ])
+        .env("GK_BIN", d.join("missing_gk"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        o_missing_gk.status.code(),
+        Some(2),
+        "expected exit 2 when GK_BIN missing: {}",
+        String::from_utf8_lossy(&o_missing_gk.stderr)
+    );
+    assert!(String::from_utf8_lossy(&o_missing_gk.stderr).to_lowercase().contains("gk"));
+
+    let o = Command::new(bin())
+        .args([
+            "blind",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--metrics",
+            metrics.to_str().unwrap(),
+            "--top",
+            "4",
+        ])
+        .env("GK_BIN", &fake_gk)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(std::fs::read_to_string(&gk_log).unwrap().contains("blind make"));
+
+    let pubdoc: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("judge.json")).unwrap()).unwrap();
     let pairs = pubdoc["pairs"].as_array().unwrap();
     assert!(pairs.len() >= 4, "{pairs:?}");
     for p in pairs {
-        assert_eq!(&std::fs::read(out.join(p["file"].as_str().unwrap())).unwrap()[1..4], b"PNG");
-        // The judged folder names no rig and holds no key.
-        assert!(p["left"].as_str().unwrap().starts_with("pair_"));
+        assert_eq!(&std::fs::read(out.join(p["sheet"].as_str().unwrap())).unwrap()[1..4], b"PNG");
+        assert!(p["left"].as_str().unwrap().starts_with("pair-"));
     }
-    assert!(!out.join("answer_key.json").exists() && !out.to_string_lossy().contains("key"));
+    assert!(!out.join("answer_key.json").exists() && !out.join("pairs.key.json").exists());
     let key: serde_json::Value = serde_json::from_slice(&std::fs::read(d.join("pairs.key.json")).unwrap()).unwrap();
     let kpairs = key["pairs"].as_array().unwrap();
     assert_eq!(kpairs.len(), pairs.len());
     assert_eq!(kpairs.iter().filter(|p| p["category"] == "control").count(), 1);
     assert_eq!(kpairs.iter().filter(|p| p["category"] == "planted").count(), 1);
     assert!(kpairs.iter().filter(|p| p["category"] == "claim").all(|p| p["tears_winner"] == "A" || p["tears_winner"] == "B"));
-    // A perfect judge: tears' winner on claims, can't-tell on the
-    // control, the unplanted rig on the planted case.
+
+    // A perfect judge: tears' winner on claims, can't-tell on the control, unplanted rig on planted.
     let mut answers = serde_json::Map::new();
     for p in kpairs {
-        let n = p["pair"].as_u64().unwrap();
+        let id = p["id"].as_str().unwrap();
         let ans = match p["category"].as_str().unwrap() {
             "control" => "cant_tell",
             _ => {
@@ -188,30 +301,42 @@ fn blind_pairs_and_scoring() {
                 if p["left_rig"].as_str().unwrap() == want { "left" } else { "right" }
             }
         };
-        answers.insert(format!("pair_{n:02}"), ans.into());
+        answers.insert(id.into(), ans.into());
     }
     let af = d.join("answers.json");
     std::fs::write(&af, serde_json::to_string(&answers).unwrap()).unwrap();
-    let (c, stdout, _) = run(&["blind-score", out.to_str().unwrap(), "--answers", af.to_str().unwrap()]);
-    assert_eq!(c, 0, "{stdout}");
+    let os = Command::new(bin())
+        .args(["blind-score", out.to_str().unwrap(), "--answers", af.to_str().unwrap()])
+        .env("GK_BIN", &fake_gk)
+        .output()
+        .unwrap();
+    assert_eq!(os.status.code(), Some(0), "{}\n{}", String::from_utf8_lossy(&os.stdout), String::from_utf8_lossy(&os.stderr));
+    assert!(std::fs::read_to_string(&gk_log).unwrap().contains("blind score"));
     let verdict: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("verdict.json")).unwrap()).unwrap();
     assert_eq!(verdict["pass"], true, "{verdict}");
     assert_eq!(verdict["control_ok"], true);
     assert_eq!(verdict["planted_ok"], true);
     assert_eq!(verdict["planted_tears_ok"], true);
-    // On the cape's claims the judge and tears agree against the
-    // score (18.1 beats 9.7 there): those pairs retire it.
     let retired = verdict["score_retired_pairs"].as_array().unwrap();
     assert!(!retired.is_empty(), "{verdict}");
-    // Picking the planted side must fail the run.
-    for p in kpairs.iter().filter(|p| p["category"] == "planted") {
+    // Picking the planted side (also using `pair_NN` underscore alias) must fail the run.
+    let mut bad_answers = serde_json::Map::new();
+    for p in kpairs {
         let n = p["pair"].as_u64().unwrap();
-        let bad_side = if p["left_rig"].as_str().unwrap() == p["expected"].as_str().unwrap() { "right" } else { "left" };
-        answers.insert(format!("pair_{n:02}"), bad_side.into());
+        let ans = if p["category"] == "planted" {
+            if p["left_rig"].as_str().unwrap() == p["expected"].as_str().unwrap() { "right" } else { "left" }
+        } else {
+            answers[p["id"].as_str().unwrap()].as_str().unwrap()
+        };
+        bad_answers.insert(format!("pair_{n:02}"), ans.into());
     }
-    std::fs::write(&af, serde_json::to_string(&answers).unwrap()).unwrap();
-    let (c, stdout, _) = run(&["blind-score", out.to_str().unwrap(), "--answers", af.to_str().unwrap()]);
-    assert_eq!(c, 1, "{stdout}");
+    std::fs::write(&af, serde_json::to_string(&bad_answers).unwrap()).unwrap();
+    let ob = Command::new(bin())
+        .args(["blind-score", out.to_str().unwrap(), "--answers", af.to_str().unwrap()])
+        .env("GK_BIN", &fake_gk)
+        .output()
+        .unwrap();
+    assert_eq!(ob.status.code(), Some(1), "{}", String::from_utf8_lossy(&ob.stdout));
     // Unknown flags are usage errors here too.
     assert_eq!(run(&["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out.to_str().unwrap(), "--seed", "x"]).0, 2);
     assert_eq!(run(&["blind-score", out.to_str().unwrap()]).0, 2);
@@ -232,10 +357,19 @@ fn blind_follow_requires_explicit_metrics_without_hlh_fallback() {
     std::fs::create_dir_all(fake_hlh_metrics.parent().unwrap()).unwrap();
     std::fs::write(&fake_hlh_metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
 
+    let fake_gk = d.join("gk");
+    std::fs::write(
+        &fake_gk,
+        "#!/usr/bin/env python3\nimport json, os, shutil, sys\nout = sys.argv[sys.argv.index('--out')+1]\na = sys.argv[sys.argv.index('--a')+1]\nb = sys.argv[sys.argv.index('--b')+1]\nos.makedirs(out, exist_ok=True)\nimgs = sorted(os.listdir(a))\njson.dump({'version':1,'question':'q','answers':'x','pairs':[{'id':'pair-01','left':'pair-01-left.png','right':'pair-01-right.png','sheet':'pair-01.png'},{'id':'pair-02','left':'pair-02-left.png','right':'pair-02-right.png','sheet':'pair-02.png'},{'id':'pair-03','left':'pair-03-left.png','right':'pair-03-right.png','sheet':'pair-03.png'}]}, open(os.path.join(out,'judge.json'),'w'))\njson.dump({'version':1,'seed':1,'question':'q','pairs':[{'id':'pair-01','kind':'claim','claim':imgs[0][:-4],'left':'a','rmse':10.0},{'id':'pair-02','kind':'control','claim':'ctrl','left':'a','rmse':0.0},{'id':'pair-03','kind':'planted','claim':'pl','left':'a','rmse':50.0}]}, open(out+'.key.json','w'))\n",
+    )
+    .unwrap();
+    Command::new("chmod").arg("+x").arg(&fake_gk).status().unwrap();
+
     let out_missing = d.join("pairs_missing");
     let o = Command::new(bin())
         .args(["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out_missing.to_str().unwrap(), "--top", "1"])
         .env("HOME", &fake_home)
+        .env("GK_BIN", &fake_gk)
         .env_remove("HLH_METRICS")
         .env_remove("METRICS_FILE")
         .output()
@@ -259,6 +393,7 @@ fn blind_follow_requires_explicit_metrics_without_hlh_fallback() {
             "1",
         ])
         .env("HOME", &fake_home)
+        .env("GK_BIN", &fake_gk)
         .env_remove("HLH_METRICS")
         .env_remove("METRICS_FILE")
         .output()
