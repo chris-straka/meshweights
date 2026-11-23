@@ -284,16 +284,15 @@ pub fn game_fit(view: &View, posed: &[&[Vec3]], rest_height: f64, cell_w: usize,
 }
 
 fn blind_colors(model: &Model, paint: &Paint) -> Vec<[f64; 3]> {
-    // The character's own paint, dimmed the way the finding sheets
-    // dim it, so shape reads first and paint second.
+    // The character's own paint, kept clear of pure black and pure white so
+    // every garment silhouette and fold reads cleanly against the studio backdrop.
     (0..model.nverts())
         .map(|v| {
             let c = paint.rgb[v];
-            let l = 0.3 * c[0] as f64 + 0.59 * c[1] as f64 + 0.11 * c[2] as f64;
             [
-                0.15 + 0.6 * (0.7 * c[0] as f64 + 0.3 * l),
-                0.15 + 0.6 * (0.7 * c[1] as f64 + 0.3 * l),
-                0.15 + 0.6 * (0.7 * c[2] as f64 + 0.3 * l),
+                0.06 + 0.72 * (c[0] as f64).clamp(0.0, 1.0),
+                0.06 + 0.72 * (c[1] as f64).clamp(0.0, 1.0),
+                0.06 + 0.72 * (c[2] as f64).clamp(0.0, 1.0),
             ]
         })
         .collect()
@@ -303,12 +302,12 @@ fn blind_colors(model: &Model, paint: &Paint) -> Vec<[f64; 3]> {
 /// by `f`, labelled only with `label` ("LEFT" or "RIGHT").
 pub fn cell_image(side: &BlindSide, pose: usize, view: &View, f: Fit, w: usize, h: usize, label: &str) -> Image {
     let mut img = Image::new(w, h, crate::render::BG);
-    img.rect(2, 2, w - 4, h - 4, [32, 35, 42]);
+    img.rect(2, 2, w - 4, h - 4, [224, 228, 234]);
     let posed = lbs(side.model, &side.ctx.mats[pose.min(side.ctx.mats.len().saturating_sub(1))], side.weights);
     let colors = blind_colors(side.model, side.paint);
     draw_mesh(&mut img, 2, 2, w - 4, h - 4, &posed, &side.model.tris, &colors, view, f);
     if !label.is_empty() {
-        img.text(12, h - 30, label, 3, [232, 234, 238]);
+        img.text(12, h - 30, label, 3, crate::render::BG);
     }
     img
 }
@@ -348,32 +347,112 @@ pub fn map_vertices(src: &Model, dst: &Model, verts: &[u32]) -> Vec<u32> {
         .collect()
 }
 
-/// A deliberately bad copy of a rig: the weights of a mirrored limb
-/// pair (left upper arm with right upper arm, and so on) swapped, so
-/// each side follows the other side's bone. Returns the weights, the
-/// frame where the swap tears most, that tear's vertices, and what
-/// was planted. `None` when the skeleton has no mirrored limb pair
-/// the swap can tear.
-pub fn planted_bad(model: &Model, ctx: &Ctx, motion: bool) -> Option<(Weights, usize, Vec<u32>, String)> {
+/// Whether `pose_mats` keeps the rig upright (`head_share >= 0.6`),
+/// evaluated over crown vertices (`rest.y >= floor + 0.85 * height`).
+pub fn is_upright_pose(model: &Model, pose_mats: &[crate::math::Mat4]) -> bool {
+    let floor = model.rest.iter().map(|p| p.y).fold(f64::MAX, f64::min);
+    let top = model.rest.iter().map(|p| p.y).fold(f64::MIN, f64::max);
+    let h = (top - floor).max(1e-9);
+    let (mut y, mut n) = (0.0, 0usize);
+    for (v, r) in model.rest.iter().enumerate() {
+        if r.y >= floor + 0.85 * h {
+            y += crate::skin::lbs_vertex(pose_mats, &model.weights[v], *r).y;
+            n += 1;
+        }
+    }
+    n > 0 && (y / n as f64 - floor) / h >= 0.6
+}
+
+/// One candidate planted bad rig produced by mirroring left/right limb weights.
+pub struct PlantedCandidate {
+    pub weights: Weights,
+    pub pose: usize,
+    pub vertices: Vec<u32>,
+    pub what: String,
+    pub torn: usize,
+}
+
+fn mirrored_swap_map(model: &Model, role_bases: &[&str]) -> BTreeMap<u32, u32> {
     let roles = &model.skel.anatomy.roles;
+    let mut swap: BTreeMap<u32, u32> = BTreeMap::new();
+    for base in role_bases {
+        let (Some(l), Some(r)) = (roles.get(&format!("{base}.L")), roles.get(&format!("{base}.R"))) else { continue };
+        for (a, b) in l.iter().zip(r.iter()) {
+            swap.insert(*a as u32, *b as u32);
+            swap.insert(*b as u32, *a as u32);
+        }
+    }
+    // Pair twist/helper bones driven by swapped joints so helper-weighted skin moves too.
+    let helper_list = &model.skel.helpers;
+    let mut by_driver: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for h in helper_list {
+        by_driver.entry(h.driver).or_default().push(h.joint);
+    }
+    let driver_pairs: Vec<(u32, u32)> = swap.iter().filter(|&(a, b)| a < b).map(|(&a, &b)| (a, b)).collect();
+    for (la, rb) in driver_pairs {
+        if let (Some(hl), Some(hr)) = (by_driver.get(&(la as usize)), by_driver.get(&(rb as usize))) {
+            for (&a, &b) in hl.iter().zip(hr.iter()) {
+                swap.insert(a as u32, b as u32);
+                swap.insert(b as u32, a as u32);
+            }
+        }
+    }
+    swap
+}
+
+/// Candidate planted bad copies of a rig: whole mirrored limb chains
+/// (`arm`/`foreleg`, `leg`, `legK`) followed by single-role fallbacks,
+/// each evaluated for torn skin and paired with its best upright pose.
+pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<PlantedCandidate> {
+    let roles = &model.skel.anatomy.roles;
+    let mut specs: Vec<(String, Vec<String>)> = Vec::new();
+    if model.skel.anatomy.body == crate::anatomy::Body::Quadruped {
+        specs.push(("foreleg".into(), ["upper_arm", "forearm", "hand", "fingers"].iter().map(|s| (*s).into()).collect()));
+    } else {
+        specs.push(("arm".into(), ["shoulder", "upper_arm", "forearm", "hand", "fingers"].iter().map(|s| (*s).into()).collect()));
+    }
+    specs.push(("leg".into(), ["thigh", "shin", "foot", "toe"].iter().map(|s| (*s).into()).collect()));
+
+    // Multi-legged creatures: pair legK_upper / legK_lower chains.
+    let mut leg_k: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for key in roles.keys() {
+        if let Some(base) = key.strip_suffix(".L")
+            && roles.contains_key(&format!("{base}.R"))
+            && let Some((prefix, _)) = base.rsplit_once('_')
+            && prefix.starts_with("leg")
+        {
+            leg_k.entry(prefix.to_string()).or_default().push(base.to_string());
+        }
+    }
+    for (prefix, mut parts) in leg_k {
+        parts.sort();
+        parts.dedup();
+        specs.push((prefix, parts));
+    }
+
+    // Single-role fallbacks when a full limb chain is absent or untorn.
     const FIXED: &[&str] = &["upper_arm", "forearm", "thigh", "shin", "hand", "foot"];
-    let mut bases: Vec<String> = FIXED.iter().map(|s| (*s).to_string()).collect();
+    for base in FIXED {
+        specs.push(((*base).to_string(), vec![(*base).to_string()]));
+    }
     for key in roles.keys() {
         if let Some(base) = key.strip_suffix(".L")
             && !FIXED.contains(&base)
             && roles.contains_key(&format!("{base}.R"))
         {
-            bases.push(base.to_string());
+            specs.push((base.to_string(), vec![base.to_string()]));
         }
     }
-    let mut best: Option<(Weights, usize, Vec<u32>, String, usize)> = None;
-    for base in &bases {
-        let (Some(l), Some(r)) = (roles.get(&format!("{base}.L")), roles.get(&format!("{base}.R"))) else { continue };
-        let mut swap: BTreeMap<u32, u32> = BTreeMap::new();
-        for (a, b) in l.iter().zip(r.iter()) {
-            swap.insert(*a as u32, *b as u32);
-            swap.insert(*b as u32, *a as u32);
-        }
+
+    let upright: Vec<bool> = ctx.mats.iter().map(|m| is_upright_pose(model, m)).collect();
+    let any_upright = upright.iter().any(|&u| u);
+
+    let mut primary = Vec::new();
+    let mut fallback = Vec::new();
+
+    for (idx, (label, part_names)) in specs.iter().enumerate() {
+        let refs: Vec<&str> = part_names.iter().map(String::as_str).collect();
+        let swap = mirrored_swap_map(model, &refs);
         if swap.is_empty() {
             continue;
         }
@@ -385,34 +464,81 @@ pub fn planted_bad(model: &Model, ctx: &Ctx, motion: bool) -> Option<(Weights, u
         let ev = crate::metrics::evaluate_with(model, ctx, &w, false);
         let rep = crate::report::build("planted", model, ctx, &ev);
         let sec = owner::assess(model, ctx, &ev, &rep, &w, motion, "", Vec::new(), String::new());
-        let torn: usize = {
-            let mut t = vec![false; model.nverts()];
-            for f in sec.findings.iter().filter(|f| f.severity == "fail" && f.kind != "limb_through") {
-                for &v in &f.vertices {
-                    t[v as usize] = true;
-                }
+        let mut torn_mask = vec![false; model.nverts()];
+        for f in sec.findings.iter().filter(|f| f.severity == "fail" && f.kind != "limb_through") {
+            for &v in &f.vertices {
+                torn_mask[v as usize] = true;
             }
-            t.iter().filter(|&&x| x).count()
-        };
+        }
+        let torn = torn_mask.iter().filter(|&&x| x).count();
         if torn == 0 {
             continue;
         }
-        let f = sec
+        let Some(f) = sec
             .findings
             .iter()
             .filter(|f| f.severity == "fail" && f.kind != "limb_through")
-            .max_by(|a, b| a.area_cm2.total_cmp(&b.area_cm2))?;
-        let cand = (w, f.worst_pose, f.vertices.clone(), format!("the left and right {base} weights were swapped"), torn);
-        // A swap that tears a real patch is planted enough; do not
-        // shop for a worse one at the price of judging every pair.
-        if torn >= 25 {
-            return Some((cand.0, cand.1, cand.2, cand.3));
+            .max_by(|a, b| a.area_cm2.total_cmp(&b.area_cm2))
+        else {
+            continue;
+        };
+        let verts: Vec<u32> = (0..model.nverts() as u32).filter(|&v| torn_mask[v as usize]).collect();
+        let disp = |p: usize| -> f64 {
+            let mats = &ctx.mats[p];
+            verts
+                .iter()
+                .map(|&v| {
+                    let vi = v as usize;
+                    let pa = crate::skin::lbs_vertex(mats, &model.weights[vi], model.rest[vi]);
+                    let pp = crate::skin::lbs_vertex(mats, &w[vi], model.rest[vi]);
+                    (pp - pa).len()
+                })
+                .sum()
+        };
+        let best_pose = (0..ctx.mats.len())
+            .filter(|&p| !any_upright || upright[p])
+            .map(|p| (p, disp(p)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(f.worst_pose, |(p, _)| p);
+        let cand = PlantedCandidate {
+            weights: w,
+            pose: best_pose,
+            vertices: verts,
+            what: format!("the left and right {label} weights were swapped"),
+            torn,
+        };
+        let is_group = part_names.len() > 1 || idx < 2;
+        if is_group {
+            primary.push(cand);
+        } else {
+            fallback.push(cand);
         }
-        if best.as_ref().is_none_or(|b| cand.4 > b.4) {
-            best = Some(cand);
+        if primary.len() >= 2 && primary.iter().all(|c| c.torn >= 25) {
+            break;
         }
     }
-    best.map(|(w, p, v, d, _)| (w, p, v, d))
+    if primary.iter().any(|c| c.torn >= 25) {
+        primary.retain(|c| c.torn >= 25);
+        primary
+    } else {
+        primary.extend(fallback);
+        primary.sort_by_key(|a| std::cmp::Reverse(a.torn));
+        primary
+    }
+}
+
+/// A deliberately bad copy of a rig: the weights of a mirrored limb
+/// (arm or leg) swapped, so each side follows the other side's bones.
+/// Returns the weights, the frame where the swap reads clearly upright,
+/// that tear's vertices, and what was planted. `None` when the skeleton
+/// has no mirrored limb pair the swap can tear.
+pub fn planted_bad(model: &Model, ctx: &Ctx, motion: bool) -> Option<(Weights, usize, Vec<u32>, String)> {
+    let mut cands = planted_candidates(model, ctx, motion);
+    if cands.is_empty() {
+        return None;
+    }
+    let c = cands.remove(0);
+    Some((c.weights, c.pose, c.vertices, c.what))
 }
 
 // ---- The answer key and the scoring of a judge's answers ----
