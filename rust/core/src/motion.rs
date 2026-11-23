@@ -127,12 +127,12 @@ fn same_skeleton_map(src: &Model, dst: &Model) -> Option<Vec<(usize, usize)>> {
         map.push((d, s));
     }
     for &(d, s) in &map {
-        if has_real_tail(dst, d) && has_real_tail(src, s) {
-            if let (Some(dd), Some(sd)) = (dir(dst, d), dir(src, s)) {
-                if dd.dot(sd) < 0.995 {
-                    return None;
-                }
-            }
+        if has_real_tail(dst, d)
+            && has_real_tail(src, s)
+            && let (Some(dd), Some(sd)) = (dir(dst, d), dir(src, s))
+            && dd.dot(sd) < 0.995
+        {
+            return None;
         }
     }
     Some(map)

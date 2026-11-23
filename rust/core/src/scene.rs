@@ -448,11 +448,11 @@ impl Skeleton {
         // segment ends, so where a child continuing it starts.
         let mut reach: Vec<Vec<f64>> = vec![Vec::new(); n];
         for (p, vw) in rest.iter().zip(weights) {
-            if let Some(&(j, x)) = vw.first() {
-                if x >= 0.5 {
-                    let j = j as usize;
-                    reach[j].push((*p - self.head[j]).dot(yaxis[j]));
-                }
+            if let Some(&(j, x)) = vw.first()
+                && x >= 0.5
+            {
+                let j = j as usize;
+                reach[j].push((*p - self.head[j]).dot(yaxis[j]));
             }
         }
         let ext: Vec<Option<f64>> = reach
@@ -634,10 +634,11 @@ impl Skeleton {
                 visit(p, s, joint_of, done, out, depth + 1);
             }
             let j = joint_of[i];
-            if j != usize::MAX && s.vlink[j] {
-                if let Some(pj) = s.jparent[j] {
-                    visit(s.joints[pj], s, joint_of, done, out, depth + 1);
-                }
+            if j != usize::MAX
+                && s.vlink[j]
+                && let Some(pj) = s.jparent[j]
+            {
+                visit(s.joints[pj], s, joint_of, done, out, depth + 1);
             }
             out.push(i);
         }
@@ -684,7 +685,10 @@ impl Skeleton {
 
 fn tri_list(mode: u64, idx: &[u32]) -> Vec<[u32; 3]> {
     match mode {
-        4 => idx.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+        4 => {
+            let (chunks, _) = idx.as_chunks::<3>();
+            chunks.to_vec()
+        }
         5 => (2..idx.len()).map(|i| if i % 2 == 0 { [idx[i - 2], idx[i - 1], idx[i]] } else { [idx[i - 1], idx[i - 2], idx[i]] }).collect(),
         6 => (2..idx.len()).map(|i| [idx[0], idx[i - 1], idx[i]]).collect(),
         _ => Vec::new(),
@@ -697,7 +701,7 @@ pub fn normalize_vw(mut vw: VW) -> VW {
     vw.sort_by_key(|a| a.0);
     let mut out: VW = Vec::with_capacity(vw.len());
     for (j, w) in vw {
-        if !(w > 0.0) || !w.is_finite() {
+        if !w.is_finite() || w <= 0.0 {
             continue;
         }
         match out.last_mut() {
@@ -716,7 +720,8 @@ pub fn normalize_vw(mut vw: VW) -> VW {
 }
 
 pub fn sort_vw(vw: &mut VW) {
-    vw.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+    let clean = |w: f64| if w.is_finite() { w } else { f64::NEG_INFINITY };
+    vw.sort_by(|a, b| clean(b.1).total_cmp(&clean(a.1)).then(a.0.cmp(&b.0)));
 }
 
 /// Keeps the `k` largest influences, drops those below `min_w`, renormalizes.
@@ -732,6 +737,9 @@ pub fn prune_vw(vw: &VW, k: usize, min_w: f64) -> VW {
 pub fn weight_of(vw: &VW, j: u32) -> f64 {
     vw.iter().find(|a| a.0 == j).map(|a| a.1).unwrap_or(0.0)
 }
+
+type RawMeshPart = (String, String, Vec<[f32; 3]>, Vec<u32>);
+type RawMeshParts = Vec<RawMeshPart>;
 
 impl Model {
     pub fn load(path: &std::path::Path) -> Result<Model> {
@@ -1022,16 +1030,16 @@ impl Model {
     /// Puts back the file's own weights on rigid-parented vertices: those
     /// ride their joint whatever a repair proposes, and are never written.
     pub fn lock_rigid(&self, w: &mut Weights) {
-        for v in 0..self.nverts() {
-            if self.rigid[v] {
-                w[v] = self.weights[v].clone();
+        for (dst, (src, &rigid)) in w.iter_mut().zip(self.weights.iter().zip(&self.rigid)) {
+            if rigid {
+                *dst = src.clone();
             }
         }
     }
     /// Per mesh (in file order): (mesh name, node name, raw positions of
     /// all its skinned primitives concatenated, raw -> welded index).
-    pub fn raw_meshes(&self) -> Vec<(String, String, Vec<[f32; 3]>, Vec<u32>)> {
-        let mut out: Vec<(String, String, Vec<[f32; 3]>, Vec<u32>)> = Vec::new();
+    pub fn raw_meshes(&self) -> Vec<RawMeshPart> {
+        let mut out: RawMeshParts = Vec::new();
         for prim in &self.prims {
             let part = &self.parts[prim.part];
             let pos_acc =
@@ -1248,4 +1256,18 @@ pub fn vertex_normals(pos: &[Vec3], tris: &[[u32; 3]]) -> Vec<Vec3> {
         }
     }
     n.into_iter().map(Vec3::normalized).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sort_vw_places_finite_weights_before_nan() {
+        let mut vw = vec![(0, 0.25), (1, f64::NAN), (2, 0.75)];
+        sort_vw(&mut vw);
+        assert_eq!(vw[0].0, 2);
+        assert_eq!(vw[1].0, 0);
+        assert_eq!(vw[2].0, 1);
+    }
 }

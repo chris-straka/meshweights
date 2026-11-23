@@ -308,8 +308,8 @@ impl Search<'_> {
                 let sp = &self.split[mi];
                 for &(r, d, c) in &sp.mem {
                     self.tmp_me[r] = self.tmp_me[r].min(d);
-                    for f in 0..NFLAG {
-                        self.tmp_mc[r][f] = self.tmp_mc[r][f].min(c[f]);
+                    for (dst, &src) in self.tmp_mc[r].iter_mut().zip(&c) {
+                        *dst = (*dst).min(src);
                     }
                 }
                 for &(r, d) in &sp.spill_e {
@@ -326,22 +326,22 @@ impl Search<'_> {
             for r in 0..nr {
                 opt_e[r] += self.tmp_e[r];
                 self.tmp_e[r] = 0.0;
-                for f in 0..NFLAG {
-                    opt_c[r][f] += self.tmp_c[r][f];
-                    self.tmp_c[r][f] = 0;
+                for (dst, src) in opt_c[r].iter_mut().zip(&mut self.tmp_c[r]) {
+                    *dst += *src;
+                    *src = 0;
                 }
             }
         }
         for r in 0..nr {
             if self.used[r] {
                 opt_e[r] = p.orig[r] + self.mem_e[r];
-                for f in 0..NFLAG {
-                    opt_c[r][f] = p.counts[r][f] + self.mem_c[r][f];
+                for ((dst, &orig_c), &mc) in opt_c[r].iter_mut().zip(&p.counts[r]).zip(&self.mem_c[r]) {
+                    *dst = orig_c + mc;
                 }
             } else {
                 opt_e[r] = p.orig[r] + opt_e[r].min(self.tmp_me[r]);
-                for f in 0..NFLAG {
-                    opt_c[r][f] = p.counts[r][f] + opt_c[r][f].min(self.tmp_mc[r][f]);
+                for ((dst, &orig_c), &tmc) in opt_c[r].iter_mut().zip(&p.counts[r]).zip(&self.tmp_mc[r]) {
+                    *dst = orig_c + (*dst).min(tmc);
                 }
             }
         }
@@ -458,12 +458,12 @@ impl Search<'_> {
             self.apply(mi, -1);
         }
         let now = self.state().map(|(f, e)| (f, e, self.change));
-        if let (Some((mi, s)), Some(now)) = (pick, now) {
-            if better(s, now) {
-                self.apply(mi, 1);
-                self.chosen.push(mi);
-                return true;
-            }
+        if let (Some((mi, s)), Some(now)) = (pick, now)
+            && better(s, now)
+        {
+            self.apply(mi, 1);
+            self.chosen.push(mi);
+            return true;
         }
         false
     }

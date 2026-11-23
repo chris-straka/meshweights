@@ -73,6 +73,7 @@ pub fn text_width(text: &str, scale: usize) -> usize {
 }
 
 /// Draws `text` into an RGB buffer of width `w` with its top-left at (x, y).
+#[allow(clippy::too_many_arguments)]
 pub fn draw_text(buf: &mut [u8], w: usize, h: usize, x: usize, y: usize, text: &str, scale: usize, rgb: [u8; 3]) {
     let mut cx = x;
     for c in text.chars() {

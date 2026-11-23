@@ -65,11 +65,14 @@ pub struct PoseSet {
 /// A resolved pose: world-space rotations at joints (axes in the rest
 /// frame; children inherit their parent's motion), or local TRS overrides
 /// sampled from an animation clip.
+pub type LocalPose = (usize, Option<Vec3>, Option<Quat>, Option<Vec3>);
+type NodeTrs = (Option<Vec3>, Option<Quat>, Option<Vec3>);
+
 #[derive(Clone, Debug)]
 pub struct Pose {
     pub name: String,
     pub moves: Vec<(usize, Vec3, f64)>,
-    pub locals: Vec<(usize, Option<Vec3>, Option<Quat>, Option<Vec3>)>,
+    pub locals: Vec<LocalPose>,
 }
 
 pub const HUMANOID_RON: &str = include_str!("../../../poses/humanoid.ron");
@@ -123,7 +126,7 @@ fn strip_prefixes(s: &str) -> String {
 }
 
 fn side_of(n: &str) -> (Side, String) {
-    let toks: Vec<&str> = n.split(|c: char| c == '.' || c == '_' || c == '-' || c == ' ' || c == ':').filter(|t| !t.is_empty()).collect();
+    let toks: Vec<&str> = n.split(['.', '_', '-', ' ', ':']).filter(|t| !t.is_empty()).collect();
     let mut side = Side::C;
     let mut rest = Vec::new();
     for t in &toks {
@@ -267,13 +270,13 @@ pub fn name_roles(sk: &Skeleton) -> BTreeMap<String, Vec<usize>> {
         v.sort_by_key(|&j| (depth(sk, j), j));
     }
     // The spine chain: shallowest is the hips; the rest bend together.
-    if let Some(sp) = roles.get("spine").cloned() {
-        if !sp.is_empty() {
-            roles.insert("hips".into(), vec![sp[0]]);
-            if sp.len() > 1 {
-                roles.insert("spine*".into(), sp[1..].to_vec());
-                roles.insert("chest".into(), vec![*sp.last().unwrap()]);
-            }
+    if let Some(sp) = roles.get("spine").cloned()
+        && !sp.is_empty()
+    {
+        roles.insert("hips".into(), vec![sp[0]]);
+        if sp.len() > 1 {
+            roles.insert("spine*".into(), sp[1..].to_vec());
+            roles.insert("chest".into(), vec![*sp.last().unwrap()]);
         }
     }
     roles
@@ -558,16 +561,26 @@ fn clip_sample(model: &Model, how: Sampling) -> Vec<(String, Vec<Pose>)> {
                 continue;
             }
             // CUBICSPLINE stores (in, value, out) triplets: take the values.
-            let vals: Vec<f64> =
-                if interp == "CUBICSPLINE" { vals.chunks(nc * 3).flat_map(|c| c[nc..2 * nc].to_vec()).collect() } else { vals };
-            if vals.len() < times.len() * nc {
+            let vals: Vec<f64> = if interp == "CUBICSPLINE" {
+                let stride = nc.saturating_mul(3);
+                if stride == 0 || !vals.len().is_multiple_of(stride) {
+                    continue;
+                }
+                vals.chunks_exact(stride).flat_map(|c| c[nc..2 * nc].iter().copied()).collect()
+            } else {
+                vals
+            };
+            if times.len().checked_mul(nc).is_none_or(|need| vals.len() < need) {
+                continue;
+            }
+            if times.last().is_none_or(|t_last| !t0.min(times[0]).is_finite() || !t1.max(*t_last).is_finite()) {
                 continue;
             }
             t0 = t0.min(times[0]);
-            t1 = t1.max(*times.last().unwrap());
+            t1 = t1.max(*times.last().unwrap_or(&times[0]));
             tracks.push((node as usize, path.to_string(), times, vals, nc, interp == "STEP"));
         }
-        if tracks.is_empty() {
+        if tracks.is_empty() || !t0.is_finite() || !t1.is_finite() || t1 < t0 {
             continue;
         }
         let times: Vec<f64> = match how {
@@ -576,7 +589,10 @@ fn clip_sample(model: &Model, how: Sampling) -> Vec<(String, Vec<Pose>)> {
                 (0..k).map(|s| if k == 1 { t0 } else { t0 + (t1 - t0) * s as f64 / (k - 1) as f64 }).collect()
             }
             Sampling::Fps(fps) => {
-                let n = ((t1 - t0) * fps).floor() as usize;
+                if !fps.is_finite() || fps <= 0.0 {
+                    continue;
+                }
+                let n = ((t1 - t0) * fps).floor().clamp(0.0, 100_000.0) as usize;
                 let mut v: Vec<f64> = (0..=n).map(|i| t0 + i as f64 / fps).collect();
                 if t1 - v.last().copied().unwrap_or(t0) > 0.25 / fps {
                     v.push(t1);
@@ -586,7 +602,7 @@ fn clip_sample(model: &Model, how: Sampling) -> Vec<(String, Vec<Pose>)> {
         };
         let mut frames = Vec::new();
         for t in times {
-            let mut locals: BTreeMap<usize, (Option<Vec3>, Option<Quat>, Option<Vec3>)> = BTreeMap::new();
+            let mut locals: BTreeMap<usize, NodeTrs> = BTreeMap::new();
             for (node, path, times, vals, nc, step) in &tracks {
                 let i = times.partition_point(|&x| x <= t).saturating_sub(1).min(times.len() - 1);
                 let j = (i + 1).min(times.len() - 1);
@@ -725,5 +741,28 @@ mod tests {
     fn humanoid_ron_parses() {
         let s = parse_pose_set(HUMANOID_RON).unwrap();
         assert!(s.poses.len() >= 10);
+    }
+
+    #[test]
+    fn cubicspline_short_triplet_and_bad_fps_do_not_panic() {
+        let mut g = crate::fixtures::to_glb(&crate::fixtures::build("clean"));
+        let bv_t = g.append_view(&0.0f32.to_le_bytes(), None).unwrap();
+        let acc_t = g.push_accessor(serde_json::json!({"bufferView": bv_t, "componentType": 5126, "count": 1, "type": "SCALAR"})).unwrap();
+        let mut vbytes = Vec::new();
+        for v in [0.0f32, 0.0, 0.0] {
+            vbytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let bv_v = g.append_view(&vbytes, None).unwrap();
+        // 1 VEC3 instead of 3*1 VEC3 triplets expected by CUBICSPLINE.
+        let acc_v = g.push_accessor(serde_json::json!({"bufferView": bv_v, "componentType": 5126, "count": 1, "type": "VEC3"})).unwrap();
+        g.json["animations"] = serde_json::json!([{
+            "name": "bad_cubic",
+            "samplers": [{"input": acc_t, "output": acc_v, "interpolation": "CUBICSPLINE"}],
+            "channels": [{"sampler": 0, "target": {"node": 0, "path": "translation"}}]
+        }]);
+        g.sync_buffer_len().unwrap();
+        let m = Model::from_glb(g).unwrap();
+        assert!(clip_poses(&m, 4).is_empty());
+        assert!(clip_frames(&m, -1.0).is_empty());
     }
 }

@@ -29,7 +29,7 @@ fn mix(a: &Weights, b: &Weights, t: f64) -> Weights {
                     None => acc.push((j, w * (1.0 - t))),
                 }
             }
-            acc.sort_by(|p, q| q.1.partial_cmp(&p.1).unwrap().then(p.0.cmp(&q.0)));
+            acc.sort_by(|p, q| q.1.total_cmp(&p.1).then(p.0.cmp(&q.0)));
             acc.truncate(4);
             normalize_vw(acc)
         })

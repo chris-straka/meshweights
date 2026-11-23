@@ -88,7 +88,7 @@ pub fn align(pro: &Model, test: &Model) -> Result<Weights, String> {
             })
             .collect()
     };
-    if vmap.iter().any(|&i| i == usize::MAX) {
+    if vmap.contains(&usize::MAX) {
         return Err("meshes do not match (a vertex has no counterpart within 3% of the body)".into());
     }
     let mut missing = 0usize;

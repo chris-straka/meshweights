@@ -474,10 +474,16 @@ fn cmd_show(a: &Args) -> ExitCode {
             return fail(e);
         }
         println!("{}", path.display());
-        index.push(serde_json::json!({"file": path.file_name().unwrap().to_string_lossy(), "section": sec, "finding": f}));
+        index.push(
+            serde_json::json!({"file": path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), "section": sec, "finding": f}),
+        );
     }
     let findings_path = dir.join("findings.json");
-    if let Err(e) = std::fs::write(&findings_path, serde_json::to_string_pretty(&index).unwrap()) {
+    let body = match serde_json::to_string_pretty(&index) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("json: {e}")),
+    };
+    if let Err(e) = std::fs::write(&findings_path, body) {
         return fail(format!("{}: {e}", findings_path.display()));
     }
     ExitCode::SUCCESS
@@ -567,10 +573,16 @@ fn cmd_before_after(a: &Args) -> ExitCode {
             return fail(e);
         }
         println!("{}  before {:.0} cm2, after {left:.0} cm2", path.display(), f.area_cm2);
-        index.push(serde_json::json!({"file": path.file_name().unwrap().to_string_lossy(), "finding": f, "after_cm2": left}));
+        index.push(
+            serde_json::json!({"file": path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), "finding": f, "after_cm2": left}),
+        );
     }
     let ba_path = dir.join("before_after.json");
-    if let Err(e) = std::fs::write(&ba_path, serde_json::to_string_pretty(&index).unwrap()) {
+    let body = match serde_json::to_string_pretty(&index) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("json: {e}")),
+    };
+    if let Err(e) = std::fs::write(&ba_path, body) {
         return fail(format!("{}: {e}", ba_path.display()));
     }
     ExitCode::SUCCESS
@@ -588,14 +600,14 @@ fn winner_of(x: &str, y: &str, vx: f64, vy: f64, eps: f64, lower_wins: bool) -> 
 
 /// Locate the `gk` binary via `GK_BIN`, `PATH`, sibling `_tools/gk`, or `~/.cargo/bin/gk`.
 fn find_gk() -> Result<PathBuf, String> {
-    if let Some(p) = std::env::var_os("GK_BIN") {
-        if !p.is_empty() {
-            let pb = PathBuf::from(&p);
-            if pb.is_file() {
-                return Ok(pb);
-            }
-            return Err(format!("gk not found at GK_BIN={}", pb.display()));
+    if let Some(p) = std::env::var_os("GK_BIN")
+        && !p.is_empty()
+    {
+        let pb = PathBuf::from(&p);
+        if pb.is_file() {
+            return Ok(pb);
         }
+        return Err(format!("gk not found at GK_BIN={}", pb.display()));
     }
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
@@ -712,7 +724,10 @@ fn cmd_blind(a: &Args) -> ExitCode {
         }
         t
     };
-    let (ctxa, ctxb) = if use_clips { (&ca.motion.as_ref().unwrap().0, &cb.motion.as_ref().unwrap().0) } else { (&ca.ctx, &cb.ctx) };
+    let (ctxa, ctxb) = match (use_clips, ca.motion.as_ref(), cb.motion.as_ref()) {
+        (true, Some((a, _, _)), Some((b, _, _))) => (a, b),
+        _ => (&ca.ctx, &cb.ctx),
+    };
     let (torna, tornb) = (torn_of(seca, ca.model.nverts()), torn_of(secb, cb.model.nverts()));
     let (areaa, areab) = (wf::owner::vertex_areas(&ca.model), wf::owner::vertex_areas(&cb.model));
     let ka = wf::owner::BODY_M / wf::owner::height(&ca.model);
@@ -971,7 +986,9 @@ fn cmd_blind(a: &Args) -> ExitCode {
             },
         );
     }
-    let _ = claim_items.iter().map(|c| (c.pose, c.view_src, c.marked.len(), c.planted_rmse)).count();
+    for c in &claim_items {
+        let _ = (c.pose, c.view_src, c.marked.len(), c.planted_rmse);
+    }
 
     for c in &claim_items {
         if let Err(e) = write_png(&stage_a.join(format!("{}.png", c.stem)).to_string_lossy(), &c.limg)
@@ -1035,7 +1052,9 @@ fn cmd_blind(a: &Args) -> ExitCode {
             let kind = pval.get("kind").and_then(|v| v.as_str()).unwrap_or("claim").to_string();
             let left_tag = pval.get("left").and_then(|v| v.as_str()).unwrap_or("a").to_string();
             let stem = pval.get("claim").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let pobj = pval.as_object_mut().unwrap();
+            let Some(pobj) = pval.as_object_mut() else {
+                return fail("internal error: blind pair metadata is not an object".to_string());
+            };
             pobj.insert("pair".into(), serde_json::json!(pair_num));
             match kind.as_str() {
                 "control" => {
@@ -1557,10 +1576,10 @@ fn cmd_fix(a: &Args) -> ExitCode {
         // Named by file; by folder and file when two share a file name
         // (heat/x.glb and voxel/x.glb), so the report says which won.
         let mut name = file_name(p);
-        if cand_paths.iter().filter(|&&q| file_name(q) == name).count() > 1 {
-            if let Some(dir) = Path::new(p).parent().and_then(|d| d.file_name()) {
-                name = format!("{}/{name}", dir.to_string_lossy());
-            }
+        if cand_paths.iter().filter(|&&q| file_name(q) == name).count() > 1
+            && let Some(dir) = Path::new(p).parent().and_then(|d| d.file_name())
+        {
+            name = format!("{}/{name}", dir.to_string_lossy());
         }
         match wf::scene::Model::load(Path::new(p)) {
             Ok(m) => externals.push((name, m)),
@@ -1767,10 +1786,10 @@ fn main() -> ExitCode {
         Err(e) => return fail(e),
     };
     let Some(cmd) = a.pos.first() else { return fail("no command (try --help)") };
-    if let Some(allowed) = flags_of(cmd) {
-        if let Some((f, _)) = a.flags.iter().find(|(f, _)| !allowed.contains(&f.as_str())) {
-            return fail(format!("unknown flag {f} for {cmd} (try --help)"));
-        }
+    if let Some(allowed) = flags_of(cmd)
+        && let Some((f, _)) = a.flags.iter().find(|(f, _)| !allowed.contains(&f.as_str()))
+    {
+        return fail(format!("unknown flag {f} for {cmd} (try --help)"));
     }
     match a.pos[0].as_str() {
         "check" => cmd_check(&a),

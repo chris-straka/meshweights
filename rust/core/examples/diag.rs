@@ -9,9 +9,9 @@ fn main() {
         for (ri, r) in ctx.regions.iter().enumerate() {
             let vs: Vec<usize> = (0..m.nverts()).filter(|&v| ctx.vregion[v] as usize == ri).collect();
             let mut st: Vec<f64> = vs.iter().map(|&v| ev.max_stretch[v]).collect();
-            st.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            st.sort_by(|a, b| b.total_cmp(a));
             let mut th: Vec<f64> = vs.iter().map(|&v| ev.min_thin[v]).collect();
-            th.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            th.sort_by(|a, b| a.total_cmp(b));
             // thin extent along region bone
             let j = m.skel.joint_by_name(&r.name);
             let ext = j
@@ -31,7 +31,7 @@ fn main() {
             let c2 = st.iter().filter(|&&x| x > 2.0).count();
             let c25 = st.iter().filter(|&&x| x > 2.5).count();
             let c3 = st.iter().filter(|&&x| x > 3.0).count();
-            let wv = *vs.iter().max_by(|&&a, &&b| ev.max_stretch[a].partial_cmp(&ev.max_stretch[b]).unwrap()).unwrap();
+            let wv = *vs.iter().max_by(|&&a, &&b| ev.max_stretch[a].total_cmp(&ev.max_stretch[b])).unwrap();
             // region volume ratio per pose (min over poses)
             let jj = j.unwrap_or(0);
             let tris: Vec<[u32; 3]> =

@@ -90,6 +90,7 @@ fn idx(bones: &[Bone], n: &str) -> usize {
 
 /// Tube along a polyline with parallel-transport frames, capped ends.
 /// `radius(s)` returns (rx, ry) along the two frame axes.
+#[allow(clippy::too_many_arguments)]
 fn tube(
     pos: &mut Vec<Vec3>,
     tris: &mut Vec<[u32; 3]>,

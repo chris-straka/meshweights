@@ -111,6 +111,7 @@ fn tri_shells(nverts: usize, tris: &[[u32; 3]]) -> Vec<u32> {
 /// Watertight 2D point-in-triangle test along one projection axis using
 /// canonical vertex-index edge ordering so shared edges never leak or double-hit.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn ray_tri_2d(t: [u32; 3], a: (f64, f64), b: (f64, f64), c: (f64, f64), d0: f64, d1: f64, d2: f64, p: (f64, f64)) -> Option<f64> {
     let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
     if area.abs() < 1e-14 {
@@ -442,12 +443,12 @@ fn voxelize_internal(
     let all = |_: usize| true;
     let ray_data = ray_analysis(&g, pos, tris, &shell, &all, compute_edges);
     let mut flooded = 0usize;
-    for i in 0..total {
-        if g.cell[i] == 0 && (!outside[i] || ray_data.votes[i] >= 4) {
-            if outside[i] {
+    for ((cell, &out), &vote) in g.cell.iter_mut().zip(&outside).zip(&ray_data.votes).take(total) {
+        if *cell == 0 && (!out || vote >= 4) {
+            if out {
                 flooded += 1;
             }
-            g.cell[i] = 2;
+            *cell = 2;
         }
     }
     // How sealed the body is: its own triangles only, so an open piece
@@ -637,6 +638,7 @@ impl TriGrid {
         ]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn seg_hits_in_cells(
         &self,
         p0: Vec3,
@@ -662,10 +664,10 @@ impl TriGrid {
                     let e = self.offs[c + 1] as usize;
                     for &ti in &self.tris[s..e] {
                         let t = tris[ti as usize];
-                        if let Some(v) = ev {
-                            if t[0] == v || t[1] == v || t[2] == v {
-                                continue;
-                            }
+                        if let Some(v) = ev
+                            && (t[0] == v || t[1] == v || t[2] == v)
+                        {
+                            continue;
                         }
                         if seg_hits_tri(p0, dir, dir_len2, pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]) {
                             return true;
@@ -1072,8 +1074,9 @@ impl CutCellGraph {
             })
             .collect();
 
+        type VertAttach = (Vec<(u32, f32)>, Vec<(u32, f32, f64)>);
         // Side-aware vertex attachments to unobstructed interior grid nodes.
-        let v_attach: Vec<(Vec<(u32, f32)>, Vec<(u32, f32, f64)>)> = (0..nv)
+        let v_attach: Vec<VertAttach> = (0..nv)
             .into_par_iter()
             .map(|v| {
                 let p = model.rest[v];
@@ -1258,6 +1261,7 @@ fn push_vert_seed(graph: &CutCellGraph, seeds: &mut Vec<(usize, f32)>, vi: usize
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bone_seeds(
     g: &Grid,
     graph: &CutCellGraph,

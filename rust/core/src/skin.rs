@@ -36,12 +36,12 @@ pub fn joint_matrices(model: &Model, pose: &Pose) -> Vec<Mat4> {
     let mut nodes = sk.nodes.clone();
     for &(n, t, r, s) in &pose.locals {
         if let Some(nd) = nodes.get_mut(n) {
-            if t.is_some() || r.is_some() || s.is_some() {
-                if let Some(m) = nd.matrix.take() {
-                    // Animated nodes must be TRS by spec; decompose defensively.
-                    nd.t = m.translation();
-                    nd.r = m.rotation();
-                }
+            if (t.is_some() || r.is_some() || s.is_some())
+                && let Some(m) = nd.matrix.take()
+            {
+                // Animated nodes must be TRS by spec; decompose defensively.
+                nd.t = m.translation();
+                nd.r = m.rotation();
             }
             if let Some(t) = t {
                 nd.t = t;

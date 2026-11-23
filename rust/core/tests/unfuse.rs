@@ -80,14 +80,14 @@ fn a_recorded_cut_gets_its_crotch_band() {
     let leg_share = |vw: &VW| vw.iter().filter(|e| legs.side[e.0 as usize] != 0).map(|e| e.1).sum::<f64>();
     // Skin on the middle plane at and above the crotch follows no thigh.
     let mut seen = 0;
-    for v in 0..m.nverts() {
+    for (v, vw) in w.iter().enumerate().take(m.nverts()) {
         let q = m.rest[v] - legs.center;
         if q.x.abs() < 0.005 && q.y >= 0.0 && q.y < 0.1 {
             seen += 1;
-            assert!(leg_share(&w[v]) < 0.02, "vertex {v} at {:?} keeps {:.2} of thigh", m.rest[v], leg_share(&w[v]));
+            assert!(leg_share(vw) < 0.02, "vertex {v} at {:?} keeps {:.2} of thigh", m.rest[v], leg_share(vw));
         }
         // Leg weight is only ever capped.
-        assert!(leg_share(&w[v]) <= leg_share(&m.weights[v]) + 1e-9);
+        assert!(leg_share(vw) <= leg_share(&m.weights[v]) + 1e-9);
     }
     assert!(seen > 0, "the mannequin has skin on its middle plane above the crotch");
     // The shins are far below the band: untouched.

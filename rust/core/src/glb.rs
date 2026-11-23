@@ -95,7 +95,11 @@ impl Glb {
     /// (normalized integers are mapped to [0,1] / [-1,1]).
     pub fn read_f64(&self, idx: usize) -> Result<(usize, Vec<f64>)> {
         let l = self.accessor_layout(idx)?;
-        let mut out = Vec::with_capacity(l.count * l.width);
+        let len = l.count.checked_mul(l.width).ok_or_else(|| Error(format!("accessor {idx} element count overflow")))?;
+        if l.zero && len > 16_000_000 {
+            return err(format!("accessor {idx} zero-filled count {len} exceeds limit"));
+        }
+        let mut out = Vec::with_capacity(len);
         for i in 0..l.count {
             for c in 0..l.width {
                 out.push(l.read_f64(&self.bin, i, c).ok_or_else(|| Error(format!("accessor {idx} exceeds its buffer")))?);
@@ -155,10 +159,10 @@ impl Glb {
         let obj = self.json.as_object().ok_or_else(|| Error("GLB JSON root is not an object".into()))?;
         if let Some(bufs) = obj.get("buffers") {
             let arr = bufs.as_array().ok_or_else(|| Error("GLB JSON buffers is not an array".into()))?;
-            if let Some(b0) = arr.first() {
-                if !b0.is_object() {
-                    return err("GLB JSON buffers[0] is not an object");
-                }
+            if let Some(b0) = arr.first()
+                && !b0.is_object()
+            {
+                return err("GLB JSON buffers[0] is not an object");
             }
         }
         if need_views && obj.get("bufferViews").is_some_and(|v| !v.is_array()) {
@@ -284,5 +288,12 @@ mod tests {
             let mut g_acc = Glb { json: bad.clone(), bin: vec![], json_raw: None };
             let _ = g_acc.push_accessor(json!({}));
         }
+    }
+
+    #[test]
+    fn zero_filled_huge_accessor_returns_err_instead_of_panicking() {
+        let g =
+            Glb { json: json!({"accessors": [{"componentType": 5126, "count": u64::MAX, "type": "MAT4"}]}), bin: vec![], json_raw: None };
+        assert!(g.read_f64(0).is_err());
     }
 }

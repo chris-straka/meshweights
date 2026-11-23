@@ -211,7 +211,10 @@ pub fn build(file: &str, model: &Model, ctx: &Ctx, ev: &Eval) -> Report {
             bad: bad[r],
             score: energy_to_score(energies[r]),
             energy: (energies[r] * 1e6).round() / 1e6,
-            flags: flagc[r].iter().map(|(b, n)| (FLAG_NAMES.iter().find(|x| x.0 == *b).unwrap().1.to_string(), *n)).collect(),
+            flags: flagc[r]
+                .iter()
+                .map(|(b, n)| (FLAG_NAMES.iter().find(|x| x.0 == *b).map(|x| x.1.to_string()).unwrap_or_default(), *n))
+                .collect(),
             worst_pose: worst,
         });
     }

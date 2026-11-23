@@ -171,7 +171,7 @@ fn build_tree<'a>(sk: &'a Skeleton, weights: &Weights) -> Tree<'a> {
     let n = sk.joints.len();
     let helper = |j: usize| crate::helpers::helper_of(sk, j).is_some();
     let mut parent = vec![None; n];
-    for j in 0..n {
+    for (j, slot) in parent.iter_mut().enumerate() {
         if helper(j) {
             continue;
         }
@@ -182,23 +182,24 @@ fn build_tree<'a>(sk: &'a Skeleton, weights: &Weights) -> Tree<'a> {
             }
             p = sk.jparent[q];
         }
-        parent[j] = p;
+        *slot = p;
     }
     let mut mass = vec![0usize; n];
     for vw in weights {
-        if let Some(&(j, w)) = vw.first() {
-            if w > 0.0 && (j as usize) < n {
-                mass[crate::helpers::owner(sk, j as usize)] += 1;
-            }
+        if let Some(&(j, w)) = vw.first()
+            && w > 0.0
+            && (j as usize) < n
+        {
+            mass[crate::helpers::owner(sk, j as usize)] += 1;
         }
     }
     // Children lists, then subtree mass bottom-up (deepest first).
     let mut children = vec![Vec::new(); n];
-    for j in 0..n {
-        if let Some(p) = parent[j] {
-            if !helper(j) {
-                children[p].push(j);
-            }
+    for (j, &par) in parent.iter().enumerate() {
+        if let Some(p) = par
+            && !helper(j)
+        {
+            children[p].push(j);
         }
     }
     let depth = |j: usize| -> usize {
@@ -321,10 +322,10 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
                 best = Some(Leg { root, end, chain, mass: t.sub[root], foot_pos });
             }
         }
-        if let Some(l) = best {
-            if !legs.iter().any(|x| x.root == l.root) {
-                legs.push(l);
-            }
+        if let Some(l) = best
+            && !legs.iter().any(|x| x.root == l.root)
+        {
+            legs.push(l);
         }
     }
     if std::env::var_os("WF_DEBUG_ANATOMY").is_some() {
@@ -568,10 +569,11 @@ fn crown_joint(t: &Tree, rest: &[Vec3], weights: &Weights, top: f64, h: f64, lef
     let mid = body.iter().map(|&j| t.head(j).dot(left)).sum::<f64>() / body.len().max(1) as f64;
     let mut votes: BTreeMap<usize, usize> = BTreeMap::new();
     for (p, vw) in rest.iter().zip(weights) {
-        if p.y > top - 0.04 * h && (p.dot(left) - mid).abs() < 0.1 * h {
-            if let Some(&(j, _)) = vw.first() {
-                *votes.entry(crate::helpers::owner(t.sk, j as usize)).or_default() += 1;
-            }
+        if p.y > top - 0.04 * h
+            && (p.dot(left) - mid).abs() < 0.1 * h
+            && let Some(&(j, _)) = vw.first()
+        {
+            *votes.entry(crate::helpers::owner(t.sk, j as usize)).or_default() += 1;
         }
     }
     votes.into_iter().max_by_key(|&(j, m)| (m, std::cmp::Reverse(j))).map(|(j, _)| j)
@@ -690,8 +692,7 @@ fn arm_roles(a: &mut Anatomy, t: &Tree, root: usize, side: &str, left: Vec3, mid
     // a forearm before the hand.
     let lateral = |j: usize| (t.head(j).dot(left) - mid).abs();
     let collar = (0..hand_i.saturating_sub(1))
-        .filter(|&i| has_token(&t.sk.names[p[i]], &["shoulder", "clavicle", "collar", "collarbone", "scapula"]))
-        .last();
+        .rfind(|&i| has_token(&t.sk.names[p[i]], &["shoulder", "clavicle", "collar", "collarbone", "scapula"]));
     let ui = match collar {
         Some(c) => Some(c + 1),
         None => (0..hand_i.saturating_sub(1)).find(|&i| lateral(p[i]) >= 0.055 * h).or(hand_i.checked_sub(2)),

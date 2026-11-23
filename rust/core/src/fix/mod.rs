@@ -454,8 +454,8 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                 let counts = flag_counts(ctx, &flags, Some(&dirty));
                 let mut fl = Vec::new();
                 for k in (0..nr).filter(|&k| dirty[k]) {
-                    for f in 0..crate::pick::NFLAG {
-                        let d = counts[k][f] - base.counts[k][f];
+                    for (f, (&cnt, &bcnt)) in counts[k].iter().zip(&base.counts[k]).enumerate() {
+                        let d = cnt - bcnt;
                         if d != 0 {
                             fl.push((k, f, d));
                         }
@@ -868,13 +868,9 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                         let back = (0..nr)
                             .filter(|&r| pick[r] != original && after[g][r] > tin[g][r])
                             .max_by(|&a, &b| (after[g][a] - tin[g][a]).total_cmp(&(after[g][b] - tin[g][b])).then(b.cmp(&a)));
-                        match back {
-                            Some(r) => {
-                                pick[r] = original;
-                                continue;
-                            }
-                            None => return None,
-                        }
+                        let r = back?;
+                        pick[r] = original;
+                        continue;
                     }
                     let ev2 = evaluate_with(model, ctx, &w2, false);
                     let rep2 = build(file, model, ctx, &ev2);
@@ -884,13 +880,9 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                         let back = (0..nr)
                             .filter(|&r| pick[r] > 0 && pick[r] != fallback)
                             .max_by(|&a, &b| (re2[a] - cap_r(a)).total_cmp(&(re2[b] - cap_r(b))).then(b.cmp(&a)));
-                        match back {
-                            Some(r) => {
-                                pick[r] = fallback;
-                                continue;
-                            }
-                            None => return None,
-                        }
+                        let r = back?;
+                        pick[r] = fallback;
+                        continue;
                     }
                     return (worse_than_input(&cur_a) || sum_all(&after) + 2.0 < sum_all(&cur_a)).then_some((pick, w2, after));
                 }
@@ -928,9 +920,9 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
             if std::env::var_os("WF_DEBUG").is_some() {
                 eprintln!("headline guard: input weights back on {}", back.join(", "));
             }
-            for r in 0..nr {
+            for (r, ch) in choice.iter_mut().enumerate().take(nr) {
                 if (0..model.nverts()).any(|v| ctx.vregion[v] as usize == r && wg[v] != w[v]) {
-                    choice[r] = 0;
+                    *ch = 0;
                 }
             }
             w = wg;

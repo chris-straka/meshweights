@@ -287,7 +287,7 @@ fn main() {
                 let i = i as usize;
                 pos.push(model.rest[i]);
                 let c = match tri_kind[ti] {
-                    1 | 2 | 3 => [0.95, 0.10, 0.85],
+                    1..=3 => [0.95, 0.10, 0.85],
                     _ => limb_color(limb[i]),
                 };
                 col.push(if bad[i] { [1.0, 0.1, 0.1] } else { c });

@@ -40,8 +40,13 @@ fn decode_png(bytes: &[u8]) -> Option<Image> {
         png::ColorType::GrayscaleAlpha => 2,
         _ => return None,
     };
-    let mut rgb = Vec::with_capacity(w * h * 3);
-    for px in buf[..w * h * ch].chunks(ch) {
+    let needed_src = w.checked_mul(h)?.checked_mul(ch)?;
+    let needed_dst = w.checked_mul(h)?.checked_mul(3)?;
+    if buf.len() < needed_src {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(needed_dst);
+    for px in buf[..needed_src].chunks(ch) {
         match ch {
             1 | 2 => rgb.extend([px[0], px[0], px[0]]),
             _ => rgb.extend([px[0], px[1], px[2]]),
@@ -104,14 +109,14 @@ pub fn read(model: &Model) -> Paint {
         for (ri, &wi) in prim.raw_to_weld.iter().enumerate() {
             let v = wi as usize;
             let mut c = factor;
-            if let (Some(img), Some(uv)) = (image, &uv) {
-                if let (Some(&u), Some(&t)) = (uv.get(ri * 2), uv.get(ri * 2 + 1)) {
-                    let x = ((u.rem_euclid(1.0)) * img.w as f64) as usize;
-                    let y = ((t.rem_euclid(1.0)) * img.h as f64) as usize;
-                    let o = (y.min(img.h - 1) * img.w + x.min(img.w - 1)) * 3;
-                    for k in 0..3 {
-                        c[k] *= img.rgb[o + k] as f64 / 255.0;
-                    }
+            if let (Some(img), Some(uv)) = (image, &uv)
+                && let (Some(&u), Some(&t)) = (uv.get(ri * 2), uv.get(ri * 2 + 1))
+            {
+                let x = ((u.rem_euclid(1.0)) * img.w as f64) as usize;
+                let y = ((t.rem_euclid(1.0)) * img.h as f64) as usize;
+                let o = (y.min(img.h - 1) * img.w + x.min(img.w - 1)) * 3;
+                for (ck, &px) in c.iter_mut().zip(&img.rgb[o..o + 3]) {
+                    *ck *= px as f64 / 255.0;
                 }
             }
             for k in 0..3 {

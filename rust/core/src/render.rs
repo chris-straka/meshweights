@@ -192,9 +192,9 @@ pub fn draw_mesh(
             }
             let o = ((y0 + y) * img.w + x0 + x) * 3;
             let n = (SS * SS) as f64;
-            for k in 0..3 {
+            for (k, &a) in acc.iter().enumerate() {
                 let bg = img.rgb[o + k] as f64 / 255.0;
-                let v = acc[k] / n + bg * (1.0 - cov / n);
+                let v = a / n + bg * (1.0 - cov / n);
                 img.rgb[o + k] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         }
@@ -727,9 +727,9 @@ fn draw_clay(
             }
             let o = ((y0 + y) * img.w + x0 + x) * 3;
             let n = (SS * SS) as f64;
-            for k in 0..3 {
+            for (k, &a) in acc.iter().enumerate() {
                 let bg = img.rgb[o + k] as f64 / 255.0;
-                let v = acc[k] / n + bg * (1.0 - cov / n);
+                let v = a / n + bg * (1.0 - cov / n);
                 img.rgb[o + k] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         }
@@ -1199,56 +1199,6 @@ pub fn probe_clip(s: &Side, c: &ProbeCase, number: usize, o: &ZoomOpts, mut sink
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rows_rank_by_the_larger_count() {
-        let rows = rank_rows(
-            &["arm_up.L", "hip_forward.L", "knee.L", "calm"],
-            &[12, 3, 40, 0],
-            &["hip_forward.L", "arm_up.L", "calm", "finger_curl.L"],
-            &[86, 9, 0, 5],
-            3,
-        );
-        let got: Vec<(&str, (usize, usize))> = rows.iter().map(|r| (r.name.as_str(), r.counts())).collect();
-        // By the larger of the two counts, not the sum; the pose neither
-        // rig fails is left out, and the fourth-worst is cut.
-        assert_eq!(got, vec![("hip_forward.L", (3, 86)), ("knee.L", (40, 0)), ("arm_up.L", (12, 9))]);
-        // A pose only one rig has is kept, and says so.
-        assert_eq!(rows[1].b, None);
-        let all = rank_rows(&["a"], &[1], &["b"], &[2], 9);
-        assert_eq!(all.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
-        assert_eq!((all[0].a, all[0].b), (None, Some((0, 2))));
-    }
-
-    #[test]
-    fn the_headline_names_the_better_rig() {
-        let mask = [];
-        // score, tears (% of the surface torn), pass, failing findings.
-        let info = |score, tears, pass, fails| SheetInfo { title: "", mask: &mask, score, tears, pass, fails };
-        // Score and tears agree: the win is named by tears, which is
-        // what the person watching the character notices.
-        let (h, d) = zoom_headline(&info(15.1, 4.10, false, 7), &info(59.9, 0.40, false, 2), "TRIPO", "OURS", 610, 140);
-        assert_eq!(h, "OURS TEARS LESS: 0.40% VS 4.10% TORN");
-        assert_eq!(d, "TORN 0.40% VS 4.10%. SCORE 59.9 VS 15.1 (KEPT). FAILS 2 VS 7. BAD VERTS 140 VS 610");
-        // The gate comes before tears and the score.
-        let (h, _) = zoom_headline(&info(70.0, 9.0, true, 0), &info(90.0, 0.1, false, 1), "A", "B", 0, 4);
-        assert_eq!(h, "A PASSES THE GATE, B DOES NOT");
-        // Where the score points the other way from tears, the score's
-        // verdict is retired and tears names the win.
-        let (h, d) = zoom_headline(&info(90.0, 5.20, false, 1), &info(40.0, 0.50, false, 3), "PRO", "CAST", 30, 41);
-        assert_eq!(h, "CAST TEARS LESS, 0.50% VS 5.20% TORN; SCORE RETIRED");
-        assert!(d.contains("SCORE 40.0 VS 90.0 (RETIRED)"), "{d}");
-        // Tears the same within noise: the old fallbacks stand.
-        let (h, _) = zoom_headline(&info(44.9, 1.00, false, 2), &info(80.0, 1.02, false, 3), "TRIPO", "OURS", 30, 41);
-        assert_eq!(h, "MIXED: OURS SCORES 80.0 VS 44.9 BUT FAILS MORE");
-        let (h, _) = zoom_headline(&info(61.0, 1.0, false, 2), &info(61.4, 1.0, false, 2), "A", "B", 9, 9);
-        assert!(h.starts_with("ABOUT EVEN"), "{h}");
-    }
-}
-
 /// One finding of the headline (`owner.rs`) as a sheet a person can read
 /// at a glance: the whole body in the frame where it is worst, then a
 /// close-up of it there and at rest from the same camera, in the
@@ -1465,4 +1415,54 @@ pub fn before_after_sheet(b: &BaSide, a: &BaSide, area: &[u32], area_after: &[u3
     img.text(side + pw + 48, top + 8, &fit_text(&a.label, pw / 12), 2, FG);
     img.text(12, top + ph + 12, &fit_text(title, (iw - 24) / 12), 2, DIM);
     img
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_rank_by_the_larger_count() {
+        let rows = rank_rows(
+            &["arm_up.L", "hip_forward.L", "knee.L", "calm"],
+            &[12, 3, 40, 0],
+            &["hip_forward.L", "arm_up.L", "calm", "finger_curl.L"],
+            &[86, 9, 0, 5],
+            3,
+        );
+        let got: Vec<(&str, (usize, usize))> = rows.iter().map(|r| (r.name.as_str(), r.counts())).collect();
+        // By the larger of the two counts, not the sum; the pose neither
+        // rig fails is left out, and the fourth-worst is cut.
+        assert_eq!(got, vec![("hip_forward.L", (3, 86)), ("knee.L", (40, 0)), ("arm_up.L", (12, 9))]);
+        // A pose only one rig has is kept, and says so.
+        assert_eq!(rows[1].b, None);
+        let all = rank_rows(&["a"], &[1], &["b"], &[2], 9);
+        assert_eq!(all.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert_eq!((all[0].a, all[0].b), (None, Some((0, 2))));
+    }
+
+    #[test]
+    fn the_headline_names_the_better_rig() {
+        let mask = [];
+        // score, tears (% of the surface torn), pass, failing findings.
+        let info = |score, tears, pass, fails| SheetInfo { title: "", mask: &mask, score, tears, pass, fails };
+        // Score and tears agree: the win is named by tears, which is
+        // what the person watching the character notices.
+        let (h, d) = zoom_headline(&info(15.1, 4.10, false, 7), &info(59.9, 0.40, false, 2), "TRIPO", "OURS", 610, 140);
+        assert_eq!(h, "OURS TEARS LESS: 0.40% VS 4.10% TORN");
+        assert_eq!(d, "TORN 0.40% VS 4.10%. SCORE 59.9 VS 15.1 (KEPT). FAILS 2 VS 7. BAD VERTS 140 VS 610");
+        // The gate comes before tears and the score.
+        let (h, _) = zoom_headline(&info(70.0, 9.0, true, 0), &info(90.0, 0.1, false, 1), "A", "B", 0, 4);
+        assert_eq!(h, "A PASSES THE GATE, B DOES NOT");
+        // Where the score points the other way from tears, the score's
+        // verdict is retired and tears names the win.
+        let (h, d) = zoom_headline(&info(90.0, 5.20, false, 1), &info(40.0, 0.50, false, 3), "PRO", "CAST", 30, 41);
+        assert_eq!(h, "CAST TEARS LESS, 0.50% VS 5.20% TORN; SCORE RETIRED");
+        assert!(d.contains("SCORE 40.0 VS 90.0 (RETIRED)"), "{d}");
+        // Tears the same within noise: the old fallbacks stand.
+        let (h, _) = zoom_headline(&info(44.9, 1.00, false, 2), &info(80.0, 1.02, false, 3), "TRIPO", "OURS", 30, 41);
+        assert_eq!(h, "MIXED: OURS SCORES 80.0 VS 44.9 BUT FAILS MORE");
+        let (h, _) = zoom_headline(&info(61.0, 1.0, false, 2), &info(61.4, 1.0, false, 2), "A", "B", 9, 9);
+        assert!(h.starts_with("ABOUT EVEN"), "{h}");
+    }
 }

@@ -78,8 +78,7 @@ fn add_tube(
     let weights_at = |s: f64| -> VW {
         let n = chain.len();
         let mut ws = vec![1.0; n];
-        for k in 1..n {
-            let b = chain[k].1;
+        for (k, &(_, b)) in chain.iter().enumerate().skip(1) {
             let t = if band <= 0.0 { if s >= b { 1.0 } else { 0.0 } } else { smoothstep((s - (b - band)) / (2.0 * band)) };
             for (i, wi) in ws.iter_mut().enumerate() {
                 *wi *= if i < k { 1.0 - t } else { t };
@@ -124,9 +123,11 @@ fn add_tube(
     }
 }
 
+type ClipSpec<'a> = (&'a str, f64, &'a [(usize, Vec3, f64, f64)]);
+
 /// Appends glTF rotation clips to a fixture GLB. Each clip is
 /// `(name, duration_s, &[(bone_index, local_axis, peak_deg, phase_rad)])`.
-fn attach_clips(glb: &mut Glb, clips: &[(&str, f64, &[(usize, Vec3, f64, f64)])]) {
+fn attach_clips(glb: &mut Glb, clips: &[ClipSpec<'_>]) {
     let nodes = glb.json["nodes"].as_array().expect("nodes").clone();
     let mut anims = Vec::new();
     for &(name, dur, tracks) in clips {

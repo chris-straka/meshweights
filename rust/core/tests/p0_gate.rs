@@ -24,8 +24,10 @@ fn fails(r: &Report) -> Vec<(String, String)> {
     r.findings.iter().filter(|f| f.severity == "fail").map(|f| (f.code.clone(), f.region.clone())).collect()
 }
 
+type GateCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
+
 /// (fault, must find (code, region) — any of, allowed failing regions)
-const CASES: &[(&str, &[(&str, &str)], &[&str])] = &[
+const CASES: &[GateCase<'_>] = &[
     (
         "noise",
         &[("D_NOISE", "DEF-spine.001"), ("D_NOISE", "DEF-spine.002")],

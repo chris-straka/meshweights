@@ -127,8 +127,8 @@ fn partial_evaluation_matches_full() {
     }
     let full = evaluate_with(&m, &ctx, &w, false);
     let part = evaluate_partial(&m, &ctx, &w, &mask);
-    for v in 0..m.nverts() {
-        if mask[v] {
+    for (v, &in_mask) in mask.iter().enumerate().take(m.nverts()) {
+        if in_mask {
             assert!((full.energy[v] - part.energy[v]).abs() < 1e-12, "vertex {v}: {} vs {}", full.energy[v], part.energy[v]);
             assert_eq!(full.flags[v], part.flags[v]);
         }

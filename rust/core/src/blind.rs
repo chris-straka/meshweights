@@ -55,16 +55,24 @@ pub fn parse_game_camera(text: &str) -> Result<GameCamera, String> {
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("metrics.ron: {e}"))?;
     let cam = v.get("camera").ok_or("metrics.ron has no camera block")?;
     let num = |k: &str| cam.get(k).and_then(|x| x.as_f64()).ok_or(format!("metrics.ron camera has no {k}"));
-    Ok(GameCamera { distance_m: num("distance")?, fov_deg: num("fov")? })
+    let distance_m = num("distance")?;
+    let fov_deg = num("fov")?;
+    if !distance_m.is_finite() || distance_m <= 0.0 {
+        return Err(format!("metrics.ron camera distance {distance_m} must be positive and finite"));
+    }
+    if !fov_deg.is_finite() || !(fov_deg > 0.0 && fov_deg < 180.0) {
+        return Err(format!("metrics.ron camera fov {fov_deg} must be between 0 and 180"));
+    }
+    Ok(GameCamera { distance_m, fov_deg })
 }
 
 /// Explicit metrics.ron path from `METRICS_FILE` or `HLH_METRICS`, if set.
 pub fn game_metrics_path() -> Option<std::path::PathBuf> {
     for key in ["METRICS_FILE", "HLH_METRICS"] {
-        if let Some(p) = std::env::var_os(key) {
-            if !p.is_empty() {
-                return Some(p.into());
-            }
+        if let Some(p) = std::env::var_os(key)
+            && !p.is_empty()
+        {
+            return Some(p.into());
         }
     }
     None
@@ -175,8 +183,8 @@ pub fn talk_fit(view: &View, rest: &[Vec3], posed: &[Vec3], rest_height: f64, ce
     let (mut rest_c, mut posed_c, mut n) = (crate::math::v3(0.0, 0.0, 0.0), crate::math::v3(0.0, 0.0, 0.0), 0usize);
     for (r, p) in rest.iter().zip(posed.iter()) {
         if r.y >= head_lo {
-            rest_c = rest_c + *r;
-            posed_c = posed_c + *p;
+            rest_c += *r;
+            posed_c += *p;
             n += 1;
         }
     }
@@ -351,10 +359,11 @@ pub fn planted_bad(model: &Model, ctx: &Ctx, motion: bool) -> Option<(Weights, u
     const FIXED: &[&str] = &["upper_arm", "forearm", "thigh", "shin", "hand", "foot"];
     let mut bases: Vec<String> = FIXED.iter().map(|s| (*s).to_string()).collect();
     for key in roles.keys() {
-        if let Some(base) = key.strip_suffix(".L") {
-            if !FIXED.contains(&base) && roles.contains_key(&format!("{base}.R")) {
-                bases.push(base.to_string());
-            }
+        if let Some(base) = key.strip_suffix(".L")
+            && !FIXED.contains(&base)
+            && roles.contains_key(&format!("{base}.R"))
+        {
+            bases.push(base.to_string());
         }
     }
     let mut best: Option<(Weights, usize, Vec<u32>, String, usize)> = None;
@@ -680,5 +689,13 @@ mod tests {
         let bad: BTreeMap<usize, String> =
             [(1, "right".to_string()), (2, "left".to_string()), (3, "right".to_string()), (4, "left".to_string())].into_iter().collect();
         assert!(!score_pairs(&key, &bad).pass);
+    }
+
+    #[test]
+    fn parse_game_camera_rejects_nonpositive_or_invalid_fov() {
+        assert!(parse_game_camera(r#"{"camera": {"distance": 0.0, "fov": 45.0}}"#).is_err());
+        assert!(parse_game_camera(r#"{"camera": {"distance": -2.0, "fov": 45.0}}"#).is_err());
+        assert!(parse_game_camera(r#"{"camera": {"distance": 3.0, "fov": 0.0}}"#).is_err());
+        assert!(parse_game_camera(r#"{"camera": {"distance": 3.0, "fov": 180.0}}"#).is_err());
     }
 }

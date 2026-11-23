@@ -257,11 +257,11 @@ impl Mat4 {
     pub fn inverse(&self) -> Mat4 {
         // Gauss-Jordan on row-major copy.
         let mut a = [[0.0f64; 8]; 4];
-        for r in 0..4 {
-            for c in 0..4 {
-                a[r][c] = self.m[c][r];
+        for (row, r_vals) in a.iter_mut().enumerate() {
+            for (c, cell) in r_vals.iter_mut().enumerate().take(4) {
+                *cell = self.m[c][row];
             }
-            a[r][4 + r] = 1.0;
+            r_vals[4 + row] = 1.0;
         }
         for col in 0..4 {
             let mut piv = col;
@@ -275,24 +275,25 @@ impl Mat4 {
             }
             a.swap(col, piv);
             let d = a[col][col];
-            for c in 0..8 {
-                a[col][c] /= d;
+            for cell in &mut a[col] {
+                *cell /= d;
             }
             for r in 0..4 {
                 if r != col {
                     let f = a[r][col];
                     if f != 0.0 {
-                        for c in 0..8 {
-                            a[r][c] -= f * a[col][c];
+                        let piv_row = a[col];
+                        for (cell, &pv) in a[r].iter_mut().zip(&piv_row) {
+                            *cell -= f * pv;
                         }
                     }
                 }
             }
         }
         let mut out = Mat4::zero();
-        for r in 0..4 {
+        for (r, row) in a.iter().enumerate() {
             for c in 0..4 {
-                out.m[c][r] = a[r][4 + c];
+                out.m[c][r] = row[4 + c];
             }
         }
         out

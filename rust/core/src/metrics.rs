@@ -208,8 +208,8 @@ impl Ctx {
             d[d.len() / 2]
         };
         let mut per: Vec<Vec<f64>> = vec![Vec::new(); regions.len()];
-        for v in 0..model.nverts() {
-            let r = vregion[v] as usize;
+        for (v, &vr) in vregion.iter().enumerate().take(model.nverts()) {
+            let r = vr as usize;
             if let Some(j) = region_bone[r] {
                 per[r].push(sk.seg_dist(j, model.rest[v]));
             }
@@ -486,9 +486,9 @@ fn bleed_energy(ctx: &Ctx, model: &Model, w: &Weights, v: usize) -> f64 {
 pub fn piece_bones(model: &Model, w: &Weights) -> Vec<(String, Vec<String>, Vec<u32>)> {
     let nj = model.njoints();
     let mut body = vec![false; nj];
-    for v in 0..model.nverts() {
+    for (v, vw) in w.iter().enumerate().take(model.nverts()) {
         if !model.parts[model.vpart[v] as usize].piece {
-            for &(j, wt) in &w[v] {
+            for &(j, wt) in vw {
                 if wt > 0.0 {
                     body[j as usize] = true;
                 }
@@ -505,12 +505,12 @@ pub fn piece_bones(model: &Model, w: &Weights) -> Vec<(String, Vec<String>, Vec<
         }
         let mut bad: Vec<u32> = Vec::new();
         let mut verts = Vec::new();
-        for v in 0..model.nverts() {
+        for (v, vw) in w.iter().enumerate().take(model.nverts()) {
             if model.vpart[v] as usize != pi {
                 continue;
             }
             let mut hit = false;
-            for &(j, wt) in &w[v] {
+            for &(j, wt) in vw {
                 if wt > 0.0 && !body[j as usize] {
                     bad.push(j);
                     hit = true;

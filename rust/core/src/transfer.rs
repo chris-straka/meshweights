@@ -148,10 +148,10 @@ impl<'a> TriIndex<'a> {
                     }
                 }
             }
-            if let Some(h) = best {
-                if h.dist <= r as f64 * self.cell {
-                    break;
-                }
+            if let Some(h) = best
+                && h.dist <= r as f64 * self.cell
+            {
+                break;
             }
             r += 1;
         }
@@ -177,6 +177,8 @@ pub fn blend(w: &Weights, tri: [u32; 3], bary: [f64; 3]) -> VW {
 /// the legs, under a cape) get smooth weights instead of a nearest-surface
 /// jump. Returns the match map: (closest source triangle, barycentrics,
 /// matched?) per subset vertex.
+type TriangleHit = (u32, [u32; 3], [f64; 3], bool, f64);
+
 pub fn match_subset(
     index: &TriIndex,
     src_normals: &[Vec3],
@@ -186,7 +188,7 @@ pub fn match_subset(
     max_dist: f64,
     min_cos: f64,
 ) -> Vec<(u32, [u32; 3], [f64; 3], bool)> {
-    let mut out: Vec<(u32, [u32; 3], [f64; 3], bool, f64)> = subset
+    let mut out: Vec<TriangleHit> = subset
         .iter()
         .filter_map(|&v| {
             let h = index.closest(targets[v as usize])?;

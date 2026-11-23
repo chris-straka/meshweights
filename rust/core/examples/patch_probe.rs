@@ -18,8 +18,8 @@ fn main() {
     }
     let h = y1 - y0;
     let mut by: std::collections::BTreeMap<u32, Vec<usize>> = Default::default();
-    for v in 0..m.nverts() {
-        by.entry(patch[v]).or_default().push(v);
+    for (v, &p_id) in patch.iter().enumerate().take(m.nverts()) {
+        by.entry(p_id).or_default().push(v);
     }
     println!("{} patches", by.len());
     let mut rows: Vec<(usize, String)> = Vec::new();
@@ -37,8 +37,8 @@ fn main() {
             a1 = a1.max(m.rest[v].y);
             let ang = (m.rest[v].z - c.z).atan2(m.rest[v].x - c.x);
             bins[(((ang + std::f64::consts::PI) / (2.0 * std::f64::consts::PI) * 12.0) as usize).min(11)] = true;
-            for k in 0..3 {
-                col[k] += paint.rgb[v][k] as f64 / vs.len() as f64;
+            for (c, &p) in col.iter_mut().zip(&paint.rgb[v]) {
+                *c += p as f64 / vs.len() as f64;
             }
         }
         rows.push((

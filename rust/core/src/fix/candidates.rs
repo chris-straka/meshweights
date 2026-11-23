@@ -146,10 +146,10 @@ pub fn joint_bands(model: &Model, ctx: &Ctx) -> Weights {
     // Median limb radius per bone.
     let mut dists: Vec<Vec<f64>> = vec![Vec::new(); nj];
     for v in 0..model.nverts() {
-        if !is_piece(model, v) {
-            if let Some(j) = nearest(v) {
-                dists[j as usize].push(sk.seg_dist(j as usize, model.rest[v]));
-            }
+        if !is_piece(model, v)
+            && let Some(j) = nearest(v)
+        {
+            dists[j as usize].push(sk.seg_dist(j as usize, model.rest[v]));
         }
     }
     let radius: Vec<f64> = dists
@@ -324,35 +324,35 @@ pub fn mirror(model: &Model, from_left: bool) -> Option<Weights> {
     let n = model.njoints();
     let mut partner: Vec<u32> = (0..n as u32).collect();
     for (r, js) in &a.roles {
-        if let Some(base) = r.strip_suffix(".L") {
-            if let Some(other) = a.roles.get(&format!("{base}.R")) {
-                for (i, &j) in js.iter().enumerate() {
-                    if let Some(&o) = other.get(i) {
-                        // A rig posed asymmetrically at rest (a striding
-                        // figure) cannot copy weights across its midline.
-                        if ["thigh", "shin", "upper_arm", "forearm"].contains(&base)
-                            && ((sk.head[o] - refl(sk.head[j])).len() > 0.06 * model.scale
-                                || (sk.tail[o] - refl(sk.tail[j])).len() > 0.08 * model.scale)
-                        {
-                            return None;
-                        }
-                        partner[j] = o as u32;
-                        partner[o] = j as u32;
+        if let Some(base) = r.strip_suffix(".L")
+            && let Some(other) = a.roles.get(&format!("{base}.R"))
+        {
+            for (i, &j) in js.iter().enumerate() {
+                if let Some(&o) = other.get(i) {
+                    // A rig posed asymmetrically at rest (a striding
+                    // figure) cannot copy weights across its midline.
+                    if ["thigh", "shin", "upper_arm", "forearm"].contains(&base)
+                        && ((sk.head[o] - refl(sk.head[j])).len() > 0.06 * model.scale
+                            || (sk.tail[o] - refl(sk.tail[j])).len() > 0.08 * model.scale)
+                    {
+                        return None;
                     }
+                    partner[j] = o as u32;
+                    partner[o] = j as u32;
                 }
             }
         }
     }
     let in_role: std::collections::BTreeSet<usize> = a.roles.values().flatten().copied().collect();
-    for j in 0..n {
+    for (j, slot) in partner.iter_mut().enumerate() {
         if in_role.contains(&j) {
             continue;
         }
         let h = refl(sk.head[j]);
-        if let Some((k, d)) = (0..n).map(|k| (k, (sk.head[k] - h).len())).min_by(|x, y| x.1.total_cmp(&y.1).then(x.0.cmp(&y.0))) {
-            if d < 0.03 * model.scale {
-                partner[j] = k as u32;
-            }
+        if let Some((k, d)) = (0..n).map(|k| (k, (sk.head[k] - h).len())).min_by(|x, y| x.1.total_cmp(&y.1).then(x.0.cmp(&y.0)))
+            && d < 0.03 * model.scale
+        {
+            *slot = k as u32;
         }
     }
     let h = crate::owner::height(model);
@@ -431,11 +431,11 @@ pub fn map_joints(src: &Model, dst: &Model) -> Vec<Option<u32>> {
             if let Some(t) = dst.skel.joint_by_name(&src.skel.names[j]) {
                 return Some(t as u32);
             }
-            if let Some((r, i, n)) = rs.get(&j) {
-                if let Some(dj) = rd.get(r).filter(|v| !v.is_empty()) {
-                    let k = if *n <= 1 { 0 } else { ((*i as f64 / (*n - 1) as f64) * (dj.len() - 1) as f64).round() as usize };
-                    return Some(dj[k.min(dj.len() - 1)] as u32);
-                }
+            if let Some((r, i, n)) = rs.get(&j)
+                && let Some(dj) = rd.get(r).filter(|v| !v.is_empty())
+            {
+                let k = if *n <= 1 { 0 } else { ((*i as f64 / (*n - 1) as f64) * (dj.len() - 1) as f64).round() as usize };
+                return Some(dj[k.min(dj.len() - 1)] as u32);
             }
             let h = src.skel.head[j];
             let (best, d) =

@@ -14,12 +14,12 @@ pub struct Csr {
 
 impl Csr {
     pub fn mul(&self, x: &[f64], y: &mut [f64]) {
-        for i in 0..self.n {
+        for (i, yi) in y.iter_mut().enumerate().take(self.n) {
             let mut s = 0.0;
             for k in self.start[i]..self.start[i + 1] {
                 s += self.val[k] * x[self.col[k] as usize];
             }
-            y[i] = s;
+            *yi = s;
         }
     }
     pub fn diag(&self) -> Vec<f64> {

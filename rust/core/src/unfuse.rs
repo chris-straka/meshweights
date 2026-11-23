@@ -128,6 +128,8 @@ pub struct Slicer<'a> {
     stamp: u32,
 }
 
+type LoopOutline = (Vec<(f64, f64)>, bool, f64);
+
 fn edge_key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
 }
@@ -241,7 +243,7 @@ impl<'a> Slicer<'a> {
     }
 
     /// The outline through vertex `v` (just above it, else just below).
-    pub fn through(&mut self, v: usize) -> Option<(Vec<(f64, f64)>, bool, f64)> {
+    pub fn through(&mut self, v: usize) -> Option<LoopOutline> {
         let eps = 1e-5 * self.model.scale;
         let py = self.h[v];
         for y in [py + eps, py - eps] {

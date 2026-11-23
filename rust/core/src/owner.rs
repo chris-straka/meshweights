@@ -248,15 +248,22 @@ fn top_eigenvector(m: [[f64; 4]; 4]) -> [f64; 4] {
                 let t = if theta == 0.0 { 1.0 } else { t };
                 let c = 1.0 / (t * t + 1.0).sqrt();
                 let s = t * c;
-                for k in 0..4 {
-                    let (akp, akq) = (a[k][p], a[k][q]);
-                    a[k][p] = c * akp - s * akq;
-                    a[k][q] = s * akp + c * akq;
+                for row in &mut a {
+                    let (akp, akq) = (row[p], row[q]);
+                    row[p] = c * akp - s * akq;
+                    row[q] = s * akp + c * akq;
                 }
-                for k in 0..4 {
-                    let (apk, aqk) = (a[p][k], a[q][k]);
-                    a[p][k] = c * apk - s * aqk;
-                    a[q][k] = s * apk + c * aqk;
+                let (rp, rq) = if p < q {
+                    let (left, right) = a.split_at_mut(q);
+                    (&mut left[p], &mut right[0])
+                } else {
+                    let (left, right) = a.split_at_mut(p);
+                    (&mut right[0], &mut left[q])
+                };
+                for (ap, aq) in rp.iter_mut().zip(rq.iter_mut()) {
+                    let (apk, aqk) = (*ap, *aq);
+                    *ap = c * apk - s * aqk;
+                    *aq = s * apk + c * aqk;
                 }
                 for row in v.iter_mut() {
                     let (vkp, vkq) = (row[p], row[q]);
@@ -630,7 +637,7 @@ pub fn assess(
         let chain: Vec<usize> = std::iter::once(b).chain(sk.jchildren[b].iter().copied()).collect();
         let own: Vec<(u32, f64)> = w[v].iter().copied().filter(|&(j, _)| chain.contains(&crate::helpers::owner(sk, j as usize))).collect();
         let s: f64 = own.iter().map(|x| x.1).sum();
-        if s >= 0.2 && s < 0.999 {
+        if (0.2..0.999).contains(&s) {
             lag_ref[v] = Some(crate::scene::normalize_vw(own));
         }
     }
@@ -795,10 +802,12 @@ pub fn assess(
         let detail = format!("bends: up to {:.1} cm off moving as one piece ({:.0}% of its size)", r * 100.0, 100.0 * r / k / s.size);
         push(&mut findings, "stiff_bends", "D_STIFF_BENDS", "fail", s.name.clone(), s.verts.clone(), p, detail);
     }
+    type PairMap = BTreeMap<(String, String), (Vec<u32>, BTreeMap<usize, usize>)>;
+    type PairBest = BTreeMap<(String, String), (f64, usize, Vec<u32>, String)>;
     // Limb through limb: per pair of parts, the pose with the most area.
-    let mut tbest: BTreeMap<(String, String), (f64, usize, Vec<u32>, String)> = BTreeMap::new();
+    let mut tbest: PairBest = BTreeMap::new();
     for (p, po) in per.iter().enumerate() {
-        let mut pairs: BTreeMap<(String, String), (Vec<u32>, BTreeMap<usize, usize>)> = BTreeMap::new();
+        let mut pairs: PairMap = BTreeMap::new();
         for &(a, b) in &po.through {
             let (va, vb) = (model.tris[a as usize][0] as usize, model.tris[b as usize][0] as usize);
             let (ga, gb) = (vgroup[va].name(), vgroup[vb].name());
@@ -926,31 +935,6 @@ pub fn text(sections: &[Section]) -> String {
     s
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::math::v3;
-
-    #[test]
-    fn rigid_residual_is_zero_for_a_rigid_motion() {
-        let a: Vec<Vec3> = (0..20).map(|i| v3(i as f64 * 0.1, (i * i) as f64 * 0.01, (i % 3) as f64 * 0.2)).collect();
-        let q = Quat::from_axis_angle(v3(0.3, 1.0, 0.2), 0.8);
-        let b: Vec<Vec3> = a.iter().map(|p| q.rotate(*p) + v3(1.0, 2.0, 3.0)).collect();
-        assert!(rigid_residual(&a, &b) < 1e-9);
-        let mut c = b.clone();
-        c[5].y += 0.1;
-        let r = rigid_residual(&a, &c);
-        assert!(r > 0.05 && r < 0.1, "{r}");
-    }
-
-    #[test]
-    fn stiff_words_are_whole_words() {
-        assert!(words("Belt_Buckle.001").iter().any(|w| stiff_word(w)));
-        assert!(words("pouches_L").iter().any(|w| stiff_word(w)));
-        assert!(!words("Beltane_hair").iter().any(|w| stiff_word(w)));
-    }
-}
-
 /// Vertices inside failing findings (limbs inside other parts aside) of
 /// one pose group under weights `w`.
 pub fn torn(model: &Model, ctx: &Ctx, w: &Weights, motion: bool) -> Vec<bool> {
@@ -1038,5 +1022,30 @@ pub fn guard(model: &Model, groups: &[(&Ctx, bool)], input: &Weights, output: &W
         }
         (false, true) => (output.clone(), Vec::new()),
         (false, false) => everything(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::v3;
+
+    #[test]
+    fn rigid_residual_is_zero_for_a_rigid_motion() {
+        let a: Vec<Vec3> = (0..20).map(|i| v3(i as f64 * 0.1, (i * i) as f64 * 0.01, (i % 3) as f64 * 0.2)).collect();
+        let q = Quat::from_axis_angle(v3(0.3, 1.0, 0.2), 0.8);
+        let b: Vec<Vec3> = a.iter().map(|p| q.rotate(*p) + v3(1.0, 2.0, 3.0)).collect();
+        assert!(rigid_residual(&a, &b) < 1e-9);
+        let mut c = b.clone();
+        c[5].y += 0.1;
+        let r = rigid_residual(&a, &c);
+        assert!(r > 0.05 && r < 0.1, "{r}");
+    }
+
+    #[test]
+    fn stiff_words_are_whole_words() {
+        assert!(words("Belt_Buckle.001").iter().any(|w| stiff_word(w)));
+        assert!(words("pouches_L").iter().any(|w| stiff_word(w)));
+        assert!(!words("Beltane_hair").iter().any(|w| stiff_word(w)));
     }
 }

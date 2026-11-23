@@ -34,7 +34,7 @@ fn main() {
         if xs.len() < 5 {
             continue;
         }
-        xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        xs.sort_by(|a, b| a.0.total_cmp(&b.0));
         let r = xs[xs.len() / 2].0;
         let p90 = xs[xs.len() * 9 / 10].0;
         let l = xs.iter().map(|x| x.1).sum::<f64>() / xs.len() as f64;
