@@ -45,13 +45,18 @@ i = 0
 while i < len(argv):
     a = argv[i]
     if a == "--ref":
-        REF = argv[i + 1]; i += 2
+        REF = argv[i + 1]
+        i += 2
     elif a == "--variant":
-        k, v = argv[i + 1].split("=", 1); VARIANTS.append((k, v)); i += 2
+        k, v = argv[i + 1].split("=", 1)
+        VARIANTS.append((k, v))
+        i += 2
     elif a == "--out":
-        OUT = argv[i + 1]; i += 2
+        OUT = argv[i + 1]
+        i += 2
     elif a == "--tiles":
-        TILES = argv[i + 1]; i += 2
+        TILES = argv[i + 1]
+        i += 2
     else:
         sys.exit(f"unknown arg {a}")
 
@@ -288,8 +293,8 @@ def main():
             if name == "rest":
                 continue
             d = np.linalg.norm(P - Pref[name], axis=1) / height * 100
-            l = np.linalg.norm(P[E[:, 0]] - P[E[:, 1]], axis=1)
-            r = l / np.maximum(l0, 1e-12)
+            edge_len = np.linalg.norm(P[E[:, 0]] - P[E[:, 1]], axis=1)
+            r = edge_len / np.maximum(l0, 1e-12)
             nn, a = tri_normals_areas(P, T)
             ok = a0 > 1e-14
             la = np.abs(np.log(np.maximum(a[ok], 1e-20) / a0[ok]))

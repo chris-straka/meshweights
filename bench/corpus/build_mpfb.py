@@ -234,7 +234,6 @@ def inject_faults(meshes, rig, seed):
                 o.vertex_groups[g.group].remove([v.index])
 
     body = meshes[0]
-    names = {g.index: g.name for g in body.vertex_groups}
 
     def top(v, o=body):
         gs = [(g.weight, o.vertex_groups[g.group].name) for g in v.groups if o.vertex_groups[g.group].name in bones]

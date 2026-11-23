@@ -131,9 +131,11 @@ def make_dirs(td: str):
     os.makedirs(art_dir)
     os.makedirs(gen_dir)
     for i in (1, 2, 3):
-        open(os.path.join(art_dir, f"artist_{i:02d}.glb"), "wb").write(f"art-{i}".encode())
+        with open(os.path.join(art_dir, f"artist_{i:02d}.glb"), "wb") as f:
+            f.write(f"art-{i}".encode())
     for i in (1, 2, 3):
-        open(os.path.join(gen_dir, f"gen_{i:02d}.glb"), "wb").write(f"gen-{i}".encode())
+        with open(os.path.join(gen_dir, f"gen_{i:02d}.glb"), "wb") as f:
+            f.write(f"gen-{i}".encode())
     return art_dir, gen_dir
 
 
@@ -182,14 +184,16 @@ def test_clean_calibration_passes():
         assert r.returncode == 0, f"measure failed: {r.stdout} {r.stderr}"
         assert os.path.isfile(os.path.join(out, "calib.json"))
         assert os.path.isfile(os.path.join(out, "calib.md"))
-        calib = json.load(open(os.path.join(out, "calib.json")))
+        with open(os.path.join(out, "calib.json")) as f:
+            calib = json.load(f)
         assert calib["artist_median_poses"] < calib["generated_before_median_poses"]
         assert calib["artist_median_clips"] < calib["generated_before_median_clips"]
 
         write_answers(out, ("gen_01", "gen_02", "gen_03"))
         rs = run_cli("--weights", stub, "--score", out)
         assert rs.returncode == 0, f"score failed: {rs.stdout} {rs.stderr}"
-        v = json.load(open(os.path.join(out, "calib_verdict.json")))
+        with open(os.path.join(out, "calib_verdict.json")) as f:
+            v = json.load(f)
         assert v["pass"] is True
         assert abs(v["agreement_rate"] - 0.8) < 1e-6
     print("PASS  clean calibration (artist < generated medians, 0 worse, 80% blind agreement, gates ok) passes")

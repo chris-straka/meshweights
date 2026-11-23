@@ -141,7 +141,8 @@ def test_ranking_claim_pair_generation_refusals():
         assert r.returncode == 0, f"ranking claim with all 5 held-out rigs failed: {r.stdout} {r.stderr}"
         rm = os.path.join(out_ok, "run_manifest.json")
         assert os.path.isfile(rm), "run_manifest.json must be written"
-        doc = json.load(open(rm))
+        with open(rm) as f:
+            doc = json.load(f)
         assert len(doc.get("runs", [])) == 5
     print("PASS  ranking-claim refuses missing/partial held-out and accepts complete frozen set")
 
@@ -169,9 +170,11 @@ def write_batch(batch_dir: str, mf: str, files: dict, outcomes: dict):
                 "planted_ok": plant_ok,
                 "planted_tears_ok": plant_tears_ok,
             }, f)
+        with open(p, "rb") as f:
+            sha_a = sha256_bytes(f.read())
         runs.append({
             "name": rid,
-            "sha256_a": sha256_bytes(open(p, "rb").read()),
+            "sha256_a": sha_a,
             "sha256_b": sha256_bytes(b"fixed-" + rid.encode()),
         })
     with open(os.path.join(batch_dir, "run_manifest.json"), "w") as f:

@@ -35,7 +35,8 @@ def run(cmd, out=None):
 
 def headline(path):
     try:
-        d = json.load(open(path))
+        with open(path) as f:
+            d = json.load(f)
     except (OSError, ValueError):
         return None
     out = {"score": d.get("score")}
@@ -107,7 +108,8 @@ def main():
 def compare(out, la, lb):
     def load(label):
         try:
-            return json.load(open(os.path.join(out, label, "rows.json")))
+            with open(os.path.join(out, label, "rows.json")) as f:
+                return json.load(f)
         except OSError:
             return {}
     ra, rb = load(la), load(lb)

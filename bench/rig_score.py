@@ -25,7 +25,6 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 
 CLIPS = ["walk", "run", "attack_1", "dodge", "hit", "death"]
 REST_ONLY = 'PoseSet(name: "rest", poses: [PoseSpec(name: "rest", moves: [])])\n'

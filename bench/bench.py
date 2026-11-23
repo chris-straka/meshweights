@@ -71,7 +71,7 @@ def fix(src, out):
 
 
 def evaluate(blender, ref, variants, out, tiles):
-    cmd = [blender, "-b", "--factory-startup", "--python", os.path.join(HERE, "eval_weights.py"), "--",
+    cmd = [blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python", os.path.join(HERE, "eval_weights.py"), "--",
            "--ref", ref, "--out", out]
     for k, v in variants:
         cmd += ["--variant", f"{k}={v}"]
@@ -101,7 +101,8 @@ def sheet(tiles, rows, out, title):
         for c, p in enumerate(poses):
             f = os.path.join(tiles, f"{label}__{p}.png")
             if os.path.exists(f):
-                img.paste(Image.open(f).convert("RGB"), (lw + c * tw, y))
+                with Image.open(f) as tile:
+                    img.paste(tile.convert("RGB"), (lw + c * tw, y))
     img.save(out)
 
 
@@ -127,7 +128,8 @@ def main():
                "characters": {}}
     for n in names:
         src = os.path.join(CORPUS, n)
-        meta = json.load(open(os.path.join(src, "meta.json")))
+        with open(os.path.join(src, "meta.json")) as fh:
+            meta = json.load(fh)
         w = os.path.join(out, n)
         os.makedirs(w, exist_ok=True)
         files = {k: os.path.join(src, k + ".glb") for k in ("ref", "heat", "broken", "messy_ref", "messy_heat")}
@@ -157,7 +159,7 @@ def main():
                                     "messy_heat_failed": meta.get("messy_heat_failed_meshes"),
                                     "fix": runs, "variants": variants}
         if tiles:
-            def note(k):
+            def note(k, variants=variants):
                 v = variants.get(k, {})
                 if "dev_mean" not in v:
                     return "missing"
@@ -176,7 +178,8 @@ def main():
     os.makedirs(hist, exist_ok=True)
     shutil.copy(os.path.join(out, "summary.json"), os.path.join(hist, f"{a.tag}.json"))
     shutil.copy(os.path.join(out, "scorecard.md"), os.path.join(hist, f"{a.tag}.md"))
-    print(open(os.path.join(out, "scorecard.md")).read())
+    with open(os.path.join(out, "scorecard.md")) as fh:
+        print(fh.read())
 
 
 ROWS = ["heat", "heat+wf", "ref+wf", "broken", "broken+wf", "messy_heat", "messy_heat+wf"]
@@ -212,7 +215,8 @@ def write_scorecard(s, path):
           "|---|---|---|---|---|---|---|---|---|---|"]
     for n, c in chars.items():
         v = c["variants"]
-        cell = lambda k: f"{v[k]['bad_verts']:.2f}" if k in v and "bad_verts" in v[k] else "-"
+        def cell(k, v=v):
+            return f"{v[k]['bad_verts']:.2f}" if k in v and "bad_verts" in v[k] else "-"
         L.append(f"| {n} | {c['verts']} | " + " | ".join(cell(k) for k in ROWS) + f" | {c['fix']['heat']['seconds']} |")
     with open(path, "w") as fh:
         fh.write("\n".join(L) + "\n")

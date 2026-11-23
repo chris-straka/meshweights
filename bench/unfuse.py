@@ -164,7 +164,9 @@ def table(a):
         # What the rig route keeps: per rig, the better of the first and
         # the last run, as it ranks tries (fewer failing findings, then
         # score; the first run on a tie), and which of those rules chose.
-        key = lambda x: (x.get("fails", 99), -x.get("score", 0.0))
+        def key(x):
+            return (x.get("fails", 99), -x.get("score", 0.0))
+
         picked = [min((runs[0][i], runs[-1][i]), key=key) for i in ids]
         took = sum(p is runs[-1][i] for p, i in zip(picked, ids))
         lines.append(f"pick of {a.tags[0]} and {a.tags[-1]} ({took}/{len(ids)} take {a.tags[-1]}): {headline(picked)}")
@@ -184,7 +186,9 @@ def table(a):
                         d = json.load(fh)
                     whole = [v for k, v in d.items() if not k.startswith("hips")]
                     close = [v for k, v in d.items() if k.startswith("hips")]
-                    worst = lambda vs, k: max(v[k] for v in vs)
+                    def worst(vs, k):
+                        return max(v[k] for v in vs)
+
                     row += (f" {worst(whole, 'outline_changed_px')}, {worst(whole, 'colour_changed_px')} |"
                             f" {worst(close, 'outline_changed_px')}, {worst(close, 'colour_changed_px')} |")
                 except (OSError, ValueError):

@@ -32,7 +32,8 @@ def run(cmd, out=None):
 
 def load(p):
     try:
-        return json.load(open(p))
+        with open(p) as f:
+            return json.load(f)
     except (OSError, ValueError):
         return None
 
@@ -107,27 +108,27 @@ def main():
 
 
 def table(out, labels):
-    labels = ["input"] + [l for l in labels if l != "input"]
-    rigs = sorted({r for l in labels if os.path.isdir(os.path.join(out, l)) for r in os.listdir(os.path.join(out, l))})
+    labels = ["input"] + [lbl for lbl in labels if lbl != "input"]
+    rigs = sorted({r for lbl in labels if os.path.isdir(os.path.join(out, lbl)) for r in os.listdir(os.path.join(out, lbl))})
     print("Skin ever over 2 cm off the pro rig's motion on the hero's clips, % (95th percentile cm); weights off (0-1)\n")
     print("| rig | " + " | ".join(labels) + " |")
     print("|---|" + "---|" * len(labels))
-    agg = {l: [] for l in labels}
+    agg = {lbl: [] for lbl in labels}
     for r in rigs:
         cells = []
-        for l in labels:
-            s = summary(os.path.join(out, l, r), r)
+        for lbl in labels:
+            s = summary(os.path.join(out, lbl, r), r)
             if not s or "clips" not in s:
                 cells.append("-")
                 continue
             c = s["clips"]
-            agg[l].append((c["off_pct"], c["p95_cm"], s["weight_err"], c.get("tears")))
+            agg[lbl].append((c["off_pct"], c["p95_cm"], s["weight_err"], c.get("tears")))
             cells.append(f"{c['off_pct']:.1f}% ({c['p95_cm']:.1f}) w {s['weight_err']:.3f}")
         print(f"| {r} | " + " | ".join(cells) + " |")
-    for l in labels:
-        v = agg[l]
+    for lbl in labels:
+        v = agg[lbl]
         if v:
-            print(f"{l}: median off {statistics.median(x[0] for x in v):.2f}%, median p95 {statistics.median(x[1] for x in v):.2f} cm, "
+            print(f"{lbl}: median off {statistics.median(x[0] for x in v):.2f}%, median p95 {statistics.median(x[1] for x in v):.2f} cm, "
                   f"median weights off {statistics.median(x[2] for x in v):.3f}, median tears "
                   f"{statistics.median(x[3] for x in v if x[3] is not None):.2f}% ({len(v)} rigs)")
 

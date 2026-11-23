@@ -14,7 +14,6 @@ after, and the difference times ten, a row per view). Prints
 `REST_DIFF {json}`: the worst view's numbers.
 """
 import json
-import math
 import os
 import sys
 
@@ -134,7 +133,10 @@ def main():
         heat[..., 1] = (ma != mb).astype(np.float32)
         heat[..., 3] = 1.0
         bg = np.array([0.09, 0.10, 0.12])
-        flat = lambda x: np.concatenate([x[..., :3] * x[..., 3:] + bg * (1 - x[..., 3:]), np.ones_like(x[..., 3:])], -1)
+
+        def flat(x, bg=bg):
+            return np.concatenate([x[..., :3] * x[..., 3:] + bg * (1 - x[..., 3:]), np.ones_like(x[..., 3:])], -1)
+
         rows.append(np.concatenate([flat(a), flat(b), heat], 1))
     sheet = np.concatenate(rows, 0)[::-1]
     img = bpy.data.images.new("sheet", sheet.shape[1], sheet.shape[0], alpha=True)

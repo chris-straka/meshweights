@@ -60,7 +60,8 @@ def test_kind_specific_motion():
             json.dump({"version": 1, "frozen_at": "2026-11-19", "rigs": entries}, f)
 
         hero = os.path.join(td, "hero.glb")
-        open(hero, "wb").write(b"hero-clips")
+        with open(hero, "wb") as f:
+            f.write(b"hero-clips")
         log = os.path.join(td, "calls.jsonl")
         stub = os.path.join(td, "weights_stub.py")
         make_recording_weights(stub, log)
@@ -81,7 +82,8 @@ def test_kind_specific_motion():
             text=True,
         )
         assert r.returncode == 0, f"failed: {r.stdout} {r.stderr}"
-        calls = [json.loads(line) for line in open(log)]
+        with open(log) as f:
+            calls = [json.loads(line) for line in f]
         assert len(calls) == 5, f"expected 5 calls, got {len(calls)}"
         by_name = {os.path.basename(c[c.index("--out") + 1]): c for c in calls}
         for hid in ("human_01", "human_02"):
@@ -92,7 +94,8 @@ def test_kind_specific_motion():
 
         # Case 2: --creature-motion alone routes to creatures and leaves humans without --motion.
         c_gait = os.path.join(td, "creature_gait.glb")
-        open(c_gait, "wb").write(b"creature-clips")
+        with open(c_gait, "wb") as f:
+            f.write(b"creature-clips")
         log2 = os.path.join(td, "calls2.jsonl")
         stub2 = os.path.join(td, "weights_stub2.py")
         make_recording_weights(stub2, log2)
@@ -110,7 +113,8 @@ def test_kind_specific_motion():
             text=True,
         )
         assert r2.returncode == 0, f"creature-motion failed: {r2.stdout} {r2.stderr}"
-        calls2 = [json.loads(line) for line in open(log2)]
+        with open(log2) as f:
+            calls2 = [json.loads(line) for line in f]
         by_name2 = {os.path.basename(c[c.index("--out") + 1]): c for c in calls2}
         for hid in ("human_01", "human_02"):
             assert "--motion" not in by_name2[hid], f"{hid} should not get creature --motion: {by_name2[hid]}"
@@ -137,7 +141,8 @@ def test_kind_specific_motion():
             text=True,
         )
         assert r3.returncode == 0, f"combined motion failed: {r3.stdout} {r3.stderr}"
-        calls3 = [json.loads(line) for line in open(log3)]
+        with open(log3) as f:
+            calls3 = [json.loads(line) for line in f]
         by_name3 = {os.path.basename(c[c.index("--out") + 1]): c for c in calls3}
         for hid in ("human_01", "human_02"):
             assert by_name3[hid][by_name3[hid].index("--motion") + 1] == hero
@@ -162,7 +167,8 @@ def test_kind_specific_motion():
             text=True,
         )
         assert r4.returncode == 0, f"fallback motion failed: {r4.stdout} {r4.stderr}"
-        calls4 = [json.loads(line) for line in open(log4)]
+        with open(log4) as f:
+            calls4 = [json.loads(line) for line in f]
         by_name4 = {os.path.basename(c[c.index("--out") + 1]): c for c in calls4}
         for rid in files:
             assert by_name4[rid][by_name4[rid].index("--motion") + 1] == hero
