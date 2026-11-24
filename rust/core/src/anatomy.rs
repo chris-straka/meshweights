@@ -84,9 +84,10 @@ pub struct Anatomy {
     pub up: Vec3,
     pub forward: Vec3,
     /// Role -> joints (the chain's order for multi-bone roles): `hips`,
-    /// `spine*`, `chest`, `neck`, `head`, `shoulder.L`, `upper_arm.L`,
+    /// `spine*`, `chest`, `neck`, `head`, `jaw`, `shoulder.L`, `upper_arm.L`,
     /// `forearm.L`, `hand.L`, `fingers.L`, `thigh.L`, `shin.L`, `foot.L`,
-    /// `toe.L`, `tail*`; legged bodies `leg<k>_upper.L`, `leg<k>_lower.L`.
+    /// `toe.L`, `tail*`, `wing*.L`, `wing_upper.L`, `wing_mid.L`, `fin*.L`,
+    /// `limb<k>*`; legged bodies `leg<k>_upper.L`, `leg<k>_lower.L`.
     pub roles: BTreeMap<String, Vec<usize>>,
     /// Per joint (helpers take their driver's).
     pub group: Vec<Group>,
@@ -341,6 +342,99 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
             eprintln!("  leg root {} mass {} chain {:?}", nm(l.root), l.mass, l.chain.iter().map(|&j| nm(j)).collect::<Vec<_>>());
         }
     }
+    // Prune unpaired midline appendages (drooping tails, snouts, cloaks)
+    // before leg count selection so a heavy midline tail never evicts a leg.
+    let snap_forward = |leg_list: &[Leg]| -> Option<Vec3> {
+        let mut fsum = Vec3::ZERO;
+        for l in leg_list {
+            let c = &l.chain;
+            if c.len() >= 2 {
+                let d = t.head(c[c.len() - 1]) - t.head(c[c.len() - 2]);
+                let flat = v3(d.x, 0.0, d.z);
+                if flat.len() > d.y.abs() && flat.len() > 1e-9 {
+                    fsum += flat.normalized();
+                }
+            }
+        }
+        if fsum.len() > 0.5 {
+            let f = fsum.normalized();
+            Some(if f.x.abs() > f.z.abs() { v3(f.x.signum(), 0.0, 0.0) } else { v3(0.0, 0.0, f.z.signum()) })
+        } else {
+            None
+        }
+    };
+    let median_coord = |axis: Vec3| -> f64 {
+        let mut coords: Vec<f64> = (0..n).filter(|&j| t.body[j]).map(|j| t.head(j).dot(axis)).collect();
+        if coords.is_empty() {
+            return 0.0;
+        }
+        coords.sort_by(|x, y| x.total_cmp(y));
+        coords[coords.len() / 2]
+    };
+    if legs.len() >= 3 {
+        let prov_fwd = snap_forward(&legs).unwrap_or_else(|| {
+            let score_axis = |cand_fwd: Vec3| -> (usize, usize) {
+                let cand_left = up.cross(cand_fwd).normalized();
+                let mid = median_coord(cand_left);
+                let paired = legs
+                    .iter()
+                    .filter(|l| {
+                        let lat = l.foot_pos.dot(cand_left) - mid;
+                        lat.abs() >= 0.03 * h
+                            && legs.iter().any(|o| {
+                                let olat = o.foot_pos.dot(cand_left) - mid;
+                                olat * lat < 0.0
+                                    && lat.abs() >= 0.4 * olat.abs()
+                                    && olat.abs() >= 0.4 * lat.abs()
+                                    && (o.foot_pos - l.foot_pos).dot(cand_fwd).abs() < 0.15 * h
+                            })
+                    })
+                    .count();
+                let midline_joints = (0..n).filter(|&j| t.body[j] && (t.head(j).dot(cand_left) - mid).abs() < 0.025 * h).count();
+                (paired, midline_joints)
+            };
+            if score_axis(v3(1.0, 0.0, 0.0)) > score_axis(v3(0.0, 0.0, 1.0)) { v3(1.0, 0.0, 0.0) } else { v3(0.0, 0.0, 1.0) }
+        });
+        let prov_left = up.cross(prov_fwd).normalized();
+        let mid_lat = median_coord(prov_left);
+        let mut paired_lats: Vec<f64> = legs
+            .iter()
+            .filter_map(|l| {
+                let d = (l.foot_pos.dot(prov_left) - mid_lat).abs();
+                (d >= 0.03 * h).then_some(d)
+            })
+            .collect();
+        let has_pos = legs.iter().any(|l| l.foot_pos.dot(prov_left) - mid_lat >= 0.03 * h);
+        let has_neg = legs.iter().any(|l| l.foot_pos.dot(prov_left) - mid_lat <= -0.03 * h);
+        if has_pos && has_neg && paired_lats.len() >= 2 {
+            paired_lats.sort_by(|x, y| x.total_cmp(y));
+            let lat_med = paired_lats[paired_lats.len() / 2];
+            let thresh = (0.03 * h).min(0.32 * lat_med);
+            let mut keep = vec![true; legs.len()];
+            for (i, l) in legs.iter().enumerate() {
+                let f_lat = l.foot_pos.dot(prov_left) - mid_lat;
+                let r_lat = t.head(l.root).dot(prov_left) - mid_lat;
+                let partner = legs.iter().enumerate().any(|(k, o)| {
+                    if k == i {
+                        return false;
+                    }
+                    let o_lat = o.foot_pos.dot(prov_left) - mid_lat;
+                    o_lat * f_lat < 0.0 && f_lat.abs() >= 0.4 * o_lat.abs() && (o.foot_pos - l.foot_pos).dot(prov_fwd).abs() < 0.2 * h
+                });
+                if f_lat.abs() < thresh && r_lat.abs() < thresh && !partner {
+                    keep[i] = false;
+                }
+            }
+            if keep.iter().filter(|&&k| k).count() >= 2 {
+                let mut idx = 0usize;
+                legs.retain(|_| {
+                    let k = keep[idx];
+                    idx += 1;
+                    k
+                });
+            }
+        }
+    }
     // The heaviest legs; a floor-length skirt chain carries less.
     let max_mass = legs.iter().map(|l| l.mass).max().unwrap_or(0);
     legs.retain(|l| l.mass * 4 >= max_mass && l.mass > 0);
@@ -349,21 +443,8 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
         legs.pop();
     }
     // ---- facing from the toes (last bone of a leg, mostly level).
-    let mut fsum = Vec3::ZERO;
-    for l in &legs {
-        let c = &l.chain;
-        if c.len() >= 2 {
-            let d = t.head(c[c.len() - 1]) - t.head(c[c.len() - 2]);
-            let flat = v3(d.x, 0.0, d.z);
-            if flat.len() > d.y.abs() && flat.len() > 1e-9 {
-                fsum += flat.normalized();
-            }
-        }
-    }
-    if fsum.len() > 0.5 {
-        // Characters stand on an axis: snap to the nearest one.
-        let f = fsum.normalized();
-        a.forward = if f.x.abs() > f.z.abs() { v3(f.x.signum(), 0.0, 0.0) } else { v3(0.0, 0.0, f.z.signum()) };
+    if let Some(f) = snap_forward(&legs) {
+        a.forward = f;
     }
     let left = up.cross(a.forward).normalized();
     let side_of = |p: Vec3, c: Vec3| if (p - c).dot(left) >= 0.0 { "L" } else { "R" };
@@ -452,9 +533,11 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
                     set_group(&mut a, l.root, Group::Limb(format!("{grp}.{side}")));
                 }
             }
-            put(&mut a, "hips".into(), vec![hp]);
-            // Spine: hips to chest along the tree (either may hold the other).
-            let spine: Vec<usize> = if t.is_desc(ch, hp) {
+            let leg_roots: Vec<usize> = legs.iter().map(|l| l.root).collect();
+            let fwd = a.forward;
+            let mut ch = ch;
+            // Spine: hips to chest, advancing over horizontal anterior chest segments inside shoulder reach.
+            let mut spine: Vec<usize> = if t.is_desc(ch, hp) {
                 let mut p = t.path_up(ch, hp);
                 p.reverse();
                 p
@@ -463,30 +546,33 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
             } else {
                 vec![ch]
             };
-            put(&mut a, "spine*".into(), spine);
-            put(&mut a, "chest".into(), vec![ch]);
-            let leg_roots: Vec<usize> = legs.iter().map(|l| l.root).collect();
-            // Neck and head: the heaviest chain out of the chest that is no
-            // leg, ahead of the chest; tail: the one behind the hips.
-            let fwd = a.forward;
-            let reach = |r: usize, dir: Vec3| t.descendants(r).iter().map(|&j| (t.head(j) - t.head(r)).dot(dir)).fold(0.0, f64::max);
-            let off = |base: usize| -> Vec<usize> {
-                t.children[base].iter().copied().filter(|c| !leg_roots.contains(c) && !t.is_desc(hp, *c) && !t.is_desc(ch, *c)).collect()
-            };
-            if let Some(nk) = off(ch).into_iter().filter(|&c| reach(c, fwd) > 0.05 * h).max_by_key(|&c| (t.sub[c], c)) {
-                let chain = main_chain(&t, nk);
-                if let Some(&head) = chain.iter().max_by_key(|&&j| (t.mass[j], j))
-                    && let Some(hi) = chain.iter().position(|&j| j == head)
-                {
-                    put(&mut a, "neck".into(), chain[..hi].to_vec());
-                    put(&mut a, "head".into(), vec![head]);
-                    set_group(&mut a, nk, Group::Head);
+            let max_fore_fwd = front.iter().map(|&k| (t.head(legs[k].root) - t.head(hp)).dot(fwd)).fold(0.0f64, f64::max);
+            loop {
+                let cands: Vec<usize> =
+                    t.children[ch].iter().copied().filter(|c| !leg_roots.contains(c) && !t.is_desc(hp, *c) && *c != ch).collect();
+                if cands.len() != 1 {
+                    break;
+                }
+                let c = cands[0];
+                let d_fwd = (t.head(c) - t.head(hp)).dot(fwd);
+                let dy = (t.head(c).y - t.head(ch).y).abs();
+                let lat = (t.head(c) - t.head(ch)).dot(left).abs();
+                if d_fwd <= max_fore_fwd + 0.02 * h && dy < 0.05 * h && lat < 0.06 * h && main_chain(&t, c).len() >= 3 {
+                    spine.push(c);
+                    ch = c;
+                } else {
+                    break;
                 }
             }
-            if let Some(tl) = off(hp).into_iter().filter(|&c| reach(c, -fwd) > 0.05 * h).max_by_key(|&c| (t.sub[c], c)) {
-                put(&mut a, "tail*".into(), main_chain(&t, tl));
-                set_group(&mut a, tl, Group::Tail);
-            }
+            put(&mut a, "hips".into(), vec![hp]);
+            put(&mut a, "spine*".into(), spine.clone());
+            put(&mut a, "chest".into(), vec![ch]);
+            let mut spine_set: Vec<usize> = spine;
+            spine_set.push(hp);
+            spine_set.push(ch);
+            let used = assign_creature_appendages(&mut a, &t, &spine_set, hp, ch, left, fwd, h, min_mass, &leg_roots);
+            let anchors = used;
+            detect_paired_appendages(&mut a, &t, &spine_set, &anchors, left, t.head(ch).dot(left), h, "wing");
             a.notes.push("four legs: quadruped".into());
             return finish(a, sk);
         }
@@ -508,17 +594,307 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
             }
             set_group(&mut a, l.root, Group::Limb(format!("leg{i}.{side}")));
         }
+        let leg_roots: Vec<usize> = legs.iter().map(|l| l.root).collect();
+        if let (Some(&front_k), Some(&back_k)) = (order.first(), order.last())
+            && let (Some(ch), Some(hp)) = (
+                if order.len() >= 2 { t.lca(legs[front_k].root, legs[order[1]].root) } else { t.parent[legs[front_k].root] },
+                if order.len() >= 2 { t.lca(legs[back_k].root, legs[order[order.len() - 2]].root) } else { t.parent[legs[back_k].root] },
+            )
+        {
+            let fwd = a.forward;
+            let mut ch = ch;
+            put(&mut a, "hips".into(), vec![hp]);
+            let mut spine: Vec<usize> = if ch == hp {
+                vec![ch]
+            } else if t.is_desc(ch, hp) {
+                let mut p = t.path_up(ch, hp);
+                p.reverse();
+                p
+            } else if t.is_desc(hp, ch) {
+                t.path_up(hp, ch)
+            } else {
+                vec![ch]
+            };
+            // Extend chest forward along level midline trunk joints (e.g. a 2-legged
+            // winged creature whose legs meet at hips behind the ribcage/wings).
+            loop {
+                let next = t.children[ch]
+                    .iter()
+                    .copied()
+                    .filter(|&c| {
+                        !leg_roots.contains(&c)
+                            && !t.is_desc(hp, c)
+                            && c != ch
+                            && (t.head(c) - t.head(ch)).dot(fwd) > 0.02 * h
+                            && (t.head(c) - t.head(ch)).dot(left).abs() < 0.08 * h
+                            && (t.head(c).y - t.head(ch).y).abs() < 0.06 * h
+                    })
+                    .max_by_key(|&c| (t.sub[c], std::cmp::Reverse(c)));
+                let Some(c) = next else { break };
+                if main_chain(&t, c).len() < 2 && t.children[c].len() < 2 {
+                    break;
+                }
+                spine.push(c);
+                ch = c;
+                if spine.len() > n {
+                    break;
+                }
+            }
+            put(&mut a, "spine*".into(), spine.clone());
+            put(&mut a, "chest".into(), vec![ch]);
+            let mut spine_set = spine;
+            spine_set.push(hp);
+            spine_set.push(ch);
+            let mut used = assign_creature_appendages(&mut a, &t, &spine_set, hp, ch, left, fwd, h, min_mass, &leg_roots);
+            used.extend(leg_roots);
+            detect_paired_appendages(&mut a, &t, &spine_set, &used, left, centre.dot(left), h, "wing");
+        }
         a.notes.push(format!("{} legs: legged body", legs.len()));
         return finish(a, sk);
     }
     a.body = Body::Other;
+    let fwd = a.forward;
+    analyze_other_body(&mut a, &t, h, left, fwd, min_mass);
     a.notes.push("no legs found (no chain ends near the floor with weight on it)".into());
     finish(a, sk)
 }
 
+/// True when `role` distributes its move across a multi-bone chain.
+pub fn is_chain_role(role: &str) -> bool {
+    role.ends_with('*') || role.contains("*.")
+}
+
+/// Finds neck, head, jaw, and tail chains on quadruped and multi-legged bodies.
+#[allow(clippy::too_many_arguments)]
+fn assign_creature_appendages(
+    a: &mut Anatomy,
+    t: &Tree,
+    spine_set: &[usize],
+    hp: usize,
+    ch: usize,
+    left: Vec3,
+    fwd: Vec3,
+    h: f64,
+    min_mass: usize,
+    leg_roots: &[usize],
+) -> Vec<usize> {
+    let mut used = leg_roots.to_vec();
+    let off = |base: usize, used_roots: &[usize]| -> Vec<usize> {
+        t.children[base]
+            .iter()
+            .copied()
+            .filter(|c| !used_roots.contains(c) && !spine_set.contains(c) && !t.is_desc(hp, *c) && !t.is_desc(ch, *c))
+            .collect()
+    };
+    let reach_from = |base: usize, r: usize, dir: Vec3| -> f64 {
+        t.descendants(r).iter().map(|&j| (t.head(j) - t.head(base)).dot(dir)).fold(0.0f64, f64::max)
+    };
+    if let Some(nk) = off(ch, &used)
+        .into_iter()
+        .filter(|&c| {
+            let lat = (t.head(c) - t.head(ch)).dot(left).abs();
+            reach_from(ch, c, fwd) > 0.05 * h && lat < 0.14 * h
+        })
+        .max_by_key(|&c| (t.sub[c], c))
+    {
+        used.push(nk);
+        let chain = main_chain(t, nk);
+        let hi = pick_head_index(t, &chain, min_mass);
+        let head_j = chain[hi];
+        if hi > 0 {
+            a.roles.insert("neck".into(), chain[..hi].to_vec());
+        }
+        a.roles.insert("head".into(), vec![head_j]);
+        detect_jaw(a, t, head_j, fwd);
+        for j in t.all_desc(nk) {
+            a.group[j] = Group::Head;
+        }
+    }
+    if let Some(tl) = off(hp, &used)
+        .into_iter()
+        .filter(|&c| {
+            let lat = (t.head(c) - t.head(hp)).dot(left).abs();
+            reach_from(hp, c, -fwd) > 0.05 * h && lat < 0.12 * h
+        })
+        .max_by_key(|&c| (t.sub[c], c))
+    {
+        used.push(tl);
+        let tc = main_chain(t, tl);
+        if !tc.is_empty() {
+            a.roles.insert("tail*".into(), tc);
+        }
+        for j in t.all_desc(tl) {
+            a.group[j] = Group::Tail;
+        }
+    }
+    used
+}
+
+fn pick_head_index(t: &Tree, chain: &[usize], min_mass: usize) -> usize {
+    if chain.len() <= 1 {
+        return 0;
+    }
+    let chain_mass: usize = chain.iter().map(|&j| t.mass[j]).sum();
+    let min_head = (chain_mass / 16).max(min_mass);
+    let is_muzzle = |j: usize| has_token(&t.sk.names[j], &["jaw", "chin", "nose", "muzzle", "snout", "beak", "tongue"]);
+    if let Some(i) = (1..chain.len())
+        .filter(|&i| t.sk.jchildren[chain[i]].len() >= 2 && t.mass[chain[i]] >= min_head && !is_muzzle(chain[i]))
+        .max_by_key(|&i| (t.mass[chain[i]], i))
+    {
+        return i;
+    }
+    if let Some(i) = (1..chain.len())
+        .filter(|&i| has_token(&t.sk.names[chain[i]], &["head", "skull", "cranium"]) && t.mass[chain[i]] > 0)
+        .max_by_key(|&i| (t.mass[chain[i]], i))
+    {
+        return i;
+    }
+    if let Some(i) =
+        (1..chain.len()).filter(|&i| t.mass[chain[i]] >= min_head && !is_muzzle(chain[i])).max_by_key(|&i| (t.mass[chain[i]], i))
+    {
+        return i;
+    }
+    0
+}
+
+fn detect_jaw(a: &mut Anatomy, t: &Tree, head_j: usize, fwd: Vec3) {
+    let hy = t.head(head_j).y;
+    let hz = t.head(head_j).dot(fwd);
+    let jaw = t.children[head_j]
+        .iter()
+        .copied()
+        .filter(|&c| {
+            has_token(&t.sk.names[c], &["jaw", "mandible", "lowerjaw"])
+                || (t.head(c).y < hy - 1e-4 && t.head(c).dot(fwd) >= hz - 0.02 && t.children[c].len() <= 1)
+        })
+        .max_by_key(|&c| (has_token(&t.sk.names[c], &["jaw", "mandible"]), t.sub[c], std::cmp::Reverse(c)));
+    if let Some(j) = jaw {
+        a.roles.insert("jaw".into(), vec![j]);
+    }
+}
+
+/// Detects paired lateral appendages such as wings (`wing`) or pectoral fins (`fin`).
+#[allow(clippy::too_many_arguments)]
+fn detect_paired_appendages(
+    a: &mut Anatomy,
+    t: &Tree,
+    anchors: &[usize],
+    excluded_roots: &[usize],
+    left: Vec3,
+    mid: f64,
+    h: f64,
+    prefix: &str,
+) {
+    let mut left_best: Option<(usize, f64)> = None;
+    let mut right_best: Option<(usize, f64)> = None;
+    for &anc in anchors {
+        for &c in &t.children[anc] {
+            if excluded_roots.contains(&c) || anchors.contains(&c) {
+                continue;
+            }
+            let desc = t.descendants(c);
+            let lreach = desc.iter().map(|&j| t.head(j).dot(left) - mid).fold(f64::MIN, f64::max);
+            let rreach = desc.iter().map(|&j| mid - t.head(j).dot(left)).fold(f64::MIN, f64::max);
+            if lreach > 0.14 * h && lreach > rreach && left_best.is_none_or(|b| lreach > b.1) {
+                left_best = Some((c, lreach));
+            } else if rreach > 0.14 * h && rreach > lreach && right_best.is_none_or(|b| rreach > b.1) {
+                right_best = Some((c, rreach));
+            }
+        }
+    }
+    let (Some((lr, _)), Some((rr, _))) = (left_best, right_best) else { return };
+    if lr == rr {
+        return;
+    }
+    for (root, side) in [(lr, "L"), (rr, "R")] {
+        let mut chain = vec![root];
+        let mut cur = root;
+        while let Some(&nxt) = t.children[cur].iter().max_by_key(|&&c| (t.sub[c], std::cmp::Reverse(c))) {
+            // Stop before fan-like feather/fin ray splits (3+ sibling leaves at the tip).
+            if t.children[cur].len() >= 3 && t.children[nxt].is_empty() {
+                break;
+            }
+            chain.push(nxt);
+            cur = nxt;
+            if chain.len() > t.parent.len() {
+                break;
+            }
+        }
+        if !chain.is_empty() {
+            a.roles.insert(format!("{prefix}_upper.{side}"), vec![chain[0]]);
+            if chain.len() >= 3 {
+                a.roles.insert(format!("{prefix}_mid.{side}"), vec![chain[chain.len() / 2]]);
+            }
+            a.roles.insert(format!("{prefix}*.{side}"), chain);
+        }
+        for j in t.all_desc(root) {
+            a.group[j] = Group::Limb(format!("{prefix}.{side}"));
+        }
+    }
+}
+
+/// Structural pass for legless bodies (serpentine, aquatic, radial tentacles).
+fn analyze_other_body(a: &mut Anatomy, t: &Tree, h: f64, left: Vec3, fwd: Vec3, min_mass: usize) {
+    let n = t.parent.len();
+    let Some(root) = (0..n).filter(|&j| t.body[j] && t.parent[j].is_none()).max_by_key(|&j| (t.sub[j], std::cmp::Reverse(j))) else {
+        return;
+    };
+    let branches: Vec<usize> = t.children[root].iter().copied().filter(|&c| main_chain(t, c).len() >= 3).collect();
+    if branches.len() >= 4 {
+        // Radial multi-limb (octopus / squid): treat each long branch as a distributed limb chain.
+        a.roles.insert("hips".into(), vec![root]);
+        for (idx, &br) in branches.iter().enumerate() {
+            let chain = main_chain(t, br);
+            a.roles.insert(format!("limb{idx}*"), chain);
+            for j in t.all_desc(br) {
+                a.group[j] = Group::Limb(format!("limb{idx}"));
+            }
+        }
+        return;
+    }
+    // Axial swimming / serpentine body: find the primary chain and pair pectoral fins if present.
+    let mut spine = main_chain(t, root);
+    let opposite =
+        t.children[root].iter().copied().filter(|&c| Some(c) != spine.get(1).copied()).max_by_key(|&c| (t.sub[c], std::cmp::Reverse(c)));
+    if let Some(head_br) = opposite {
+        let hchain = main_chain(t, head_br);
+        if !hchain.is_empty() {
+            let hi = pick_head_index(t, &hchain, min_mass);
+            if hi > 0 {
+                a.roles.insert("neck".into(), hchain[..hi].to_vec());
+            }
+            a.roles.insert("head".into(), vec![hchain[hi]]);
+            detect_jaw(a, t, hchain[hi], fwd);
+            for j in t.all_desc(head_br) {
+                a.group[j] = Group::Head;
+            }
+        }
+    }
+    if spine.len() >= 4 {
+        let split = spine.len() / 2;
+        let tail = spine.split_off(split);
+        let head_j = spine[0];
+        a.roles.insert("spine*".into(), spine.clone());
+        a.roles.insert("tail*".into(), tail.clone());
+        for &j in &tail {
+            for d in t.all_desc(j) {
+                a.group[d] = Group::Tail;
+            }
+        }
+        if !a.roles.contains_key("head") {
+            a.roles.insert("head".into(), vec![head_j]);
+        }
+    } else if !spine.is_empty() {
+        a.roles.insert("spine*".into(), spine.clone());
+    }
+    let anchors = spine;
+    let used: Vec<usize> = anchors.clone();
+    detect_paired_appendages(a, t, &anchors, &used, left, t.head(root).dot(left), h, "fin");
+}
+
 /// A name split into lower-case words (`DEF-upper_arm.L`, `LeftShoulder`
 /// -> upper, arm, l / left, shoulder): `true` if any word is in `words`.
-fn has_token(name: &str, words: &[&str]) -> bool {
+pub(crate) fn has_token(name: &str, words: &[&str]) -> bool {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut prev_lower = false;
@@ -623,11 +999,17 @@ fn humanoid(
         a.notes.push("two legs, one subtree reaching both sides: not a humanoid".into());
         return;
     }
+    let chest_i = al.1.max(ar.1).max(1).min(path.len() - 1);
+    let trunk_d = t.head(path[chest_i]) - t.head(hips);
+    let trunk_fwd = trunk_d.dot(a.forward).abs();
+    if trunk_d.y <= trunk_fwd * 1.1 {
+        a.notes.push("two legs with level spine: legged creature, not humanoid".into());
+        return;
+    }
     a.body = Body::Humanoid;
     for k in 0..legs.len() {
         leg_roles(a, k);
     }
-    let chest_i = al.1.max(ar.1).max(1).min(path.len() - 1);
     a.roles.insert("hips".into(), vec![hips]);
     a.roles.insert("spine*".into(), path[1..=chest_i].to_vec());
     a.roles.insert("chest".into(), vec![path[chest_i]]);

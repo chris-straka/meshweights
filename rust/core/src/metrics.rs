@@ -161,7 +161,7 @@ impl Ctx {
         let roles = resolve_roles(sk);
         let mut role_of: BTreeMap<usize, String> = BTreeMap::new();
         for (r, js) in &roles {
-            if r.ends_with('*') || r == "spine" {
+            if crate::anatomy::is_chain_role(r) || r == "spine" {
                 continue;
             }
             for &j in js {

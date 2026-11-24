@@ -16,7 +16,7 @@ pub fn cmd_check(a: &Args) -> ExitCode {
         Err(e) => return fail(e),
     };
     let spec = motion_spec(a);
-    let checked = match wf::check_full(Path::new(input), &opts, &spec) {
+    let checked = match wf::check_full_with_gait(Path::new(input), &opts, &spec, a.has("--gait")) {
         Ok(x) => x,
         Err(e) => return fail(e),
     };

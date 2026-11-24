@@ -22,7 +22,7 @@ use weightforge_core::math::{Quat, Vec3, v3};
 use weightforge_core::metrics::CtxOpts;
 use weightforge_core::owner;
 use weightforge_core::scene::{Model, VW, normalize_vw};
-use weightforge_core::{MotionSpec, check_full};
+use weightforge_core::{MotionSpec, check_full, check_full_with_gait};
 
 fn f32_bytes(xs: &[f32]) -> Vec<u8> {
     let mut b = Vec::with_capacity(xs.len() * 4);
@@ -559,4 +559,264 @@ fn same_skeleton_other_creature_plays_clips_from_motion_source() {
     assert_eq!(clip_sec.clips, vec!["idle", "attack"]);
     assert!(clip_sec.frames >= 10);
     assert!(!checked.rep.anatomy.iter().any(|n| n.contains("clip not played")));
+}
+
+#[test]
+fn quadruped_with_low_drooping_tail_and_heavy_neck_preserves_hind_legs_and_neck_head() {
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let bones = vec![
+        Bone { name: leak("DEF-hips".into()), parent: None, head: v3(0.0, 0.72, -0.36), tail: v3(0.0, 0.72, -0.05) },
+        Bone { name: leak("DEF-spine.001".into()), parent: Some(0), head: v3(0.0, 0.72, -0.05), tail: v3(0.0, 0.73, 0.25) },
+        Bone { name: leak("DEF-spine.002".into()), parent: Some(1), head: v3(0.0, 0.73, 0.25), tail: v3(0.0, 0.73, 0.42) },
+        Bone { name: leak("DEF-spine.003".into()), parent: Some(2), head: v3(0.0, 0.73, 0.42), tail: v3(0.0, 0.73, 0.56) },
+        Bone { name: leak("DEF-neck".into()), parent: Some(3), head: v3(0.0, 0.73, 0.56), tail: v3(0.0, 0.90, 0.76) },
+        Bone { name: leak("DEF-head".into()), parent: Some(4), head: v3(0.0, 0.90, 0.76), tail: v3(0.0, 0.90, 0.96) },
+        // Midline tail drooping close to the floor (< 0.12*h) carrying heavier vertex mass than a hind leg.
+        Bone { name: leak("DEF-tail.001".into()), parent: Some(0), head: v3(0.0, 0.70, -0.38), tail: v3(0.0, 0.42, -0.54) },
+        Bone { name: leak("DEF-tail.002".into()), parent: Some(6), head: v3(0.0, 0.42, -0.54), tail: v3(0.0, 0.11, -0.60) },
+        Bone { name: leak("DEF-tail.003".into()), parent: Some(7), head: v3(0.0, 0.11, -0.60), tail: v3(0.0, 0.08, -0.65) },
+        // Hind legs (0.20 lateral offset)
+        Bone { name: leak("DEF-leg_hind.001.L".into()), parent: Some(0), head: v3(0.20, 0.70, -0.34), tail: v3(0.20, 0.36, -0.36) },
+        Bone { name: leak("DEF-leg_hind.002.L".into()), parent: Some(9), head: v3(0.20, 0.36, -0.36), tail: v3(0.20, 0.06, -0.34) },
+        Bone { name: leak("DEF-leg_hind.003.L".into()), parent: Some(10), head: v3(0.20, 0.06, -0.34), tail: v3(0.20, 0.02, -0.22) },
+        Bone { name: leak("DEF-leg_hind.001.R".into()), parent: Some(0), head: v3(-0.20, 0.70, -0.34), tail: v3(-0.20, 0.36, -0.36) },
+        Bone { name: leak("DEF-leg_hind.002.R".into()), parent: Some(12), head: v3(-0.20, 0.36, -0.36), tail: v3(-0.20, 0.06, -0.34) },
+        Bone { name: leak("DEF-leg_hind.003.R".into()), parent: Some(13), head: v3(-0.20, 0.06, -0.34), tail: v3(-0.20, 0.02, -0.22) },
+        // Front legs off spine.002 (so spine.003 sits inside shoulder span as anterior ribcage)
+        Bone { name: leak("DEF-leg_front.001.L".into()), parent: Some(2), head: v3(0.20, 0.72, 0.40), tail: v3(0.20, 0.38, 0.40) },
+        Bone { name: leak("DEF-leg_front.002.L".into()), parent: Some(15), head: v3(0.20, 0.38, 0.40), tail: v3(0.20, 0.06, 0.40) },
+        Bone { name: leak("DEF-leg_front.003.L".into()), parent: Some(16), head: v3(0.20, 0.06, 0.40), tail: v3(0.20, 0.02, 0.52) },
+        Bone { name: leak("DEF-leg_front.001.R".into()), parent: Some(2), head: v3(-0.20, 0.72, 0.40), tail: v3(-0.20, 0.38, 0.40) },
+        Bone { name: leak("DEF-leg_front.002.R".into()), parent: Some(18), head: v3(-0.20, 0.38, 0.40), tail: v3(-0.20, 0.06, 0.40) },
+        Bone { name: leak("DEF-leg_front.003.R".into()), parent: Some(19), head: v3(-0.20, 0.06, 0.40), tail: v3(-0.20, 0.02, 0.52) },
+    ];
+    let mut pos = Vec::new();
+    let mut tris = Vec::new();
+    let mut w = Vec::new();
+    add_tube(
+        &mut pos,
+        &mut tris,
+        &mut w,
+        &[v3(0.0, 0.72, -0.40), v3(0.0, 0.72, -0.05), v3(0.0, 0.73, 0.25), v3(0.0, 0.73, 0.56)],
+        v3(1.0, 0.0, 0.0),
+        0.04,
+        14,
+        0.16,
+        0.15,
+        &[(0, 0.0), (1, 0.35), (2, 0.65), (3, 0.82)],
+        0.05,
+    );
+    // Dense neck ruff + lighter head
+    add_tube(
+        &mut pos,
+        &mut tris,
+        &mut w,
+        &[v3(0.0, 0.73, 0.56), v3(0.0, 0.90, 0.76), v3(0.0, 0.90, 0.98)],
+        v3(1.0, 0.0, 0.0),
+        0.02,
+        18,
+        0.12,
+        0.12,
+        &[(4, 0.0), (5, 0.36)],
+        0.04,
+    );
+    // Dense bushy tail (heavier vertex count than hind legs)
+    add_tube(
+        &mut pos,
+        &mut tris,
+        &mut w,
+        &[v3(0.0, 0.70, -0.38), v3(0.0, 0.42, -0.54), v3(0.0, 0.11, -0.60), v3(0.0, 0.08, -0.65)],
+        v3(1.0, 0.0, 0.0),
+        0.015,
+        18,
+        0.08,
+        0.08,
+        &[(6, 0.0), (7, 0.30), (8, 0.62)],
+        0.04,
+    );
+    for (pts, j0, j1, j2) in [
+        ([v3(0.20, 0.70, -0.34), v3(0.20, 0.36, -0.36), v3(0.20, 0.06, -0.34), v3(0.20, 0.02, -0.22)], 9u32, 10u32, 11u32),
+        ([v3(-0.20, 0.70, -0.34), v3(-0.20, 0.36, -0.36), v3(-0.20, 0.06, -0.34), v3(-0.20, 0.02, -0.22)], 12, 13, 14),
+        ([v3(0.20, 0.72, 0.40), v3(0.20, 0.38, 0.40), v3(0.20, 0.06, 0.40), v3(0.20, 0.02, 0.52)], 15, 16, 17),
+        ([v3(-0.20, 0.72, 0.40), v3(-0.20, 0.38, 0.40), v3(-0.20, 0.06, 0.40), v3(-0.20, 0.02, 0.52)], 18, 19, 20),
+    ] {
+        add_tube(&mut pos, &mut tris, &mut w, &pts, v3(1.0, 0.0, 0.0), 0.05, 8, 0.05, 0.05, &[(j0, 0.0), (j1, 0.34), (j2, 0.64)], 0.04);
+    }
+    let m = Model::from_glb(to_glb(&Fixture {
+        bones,
+        body_pos: pos,
+        body_tris: tris,
+        body_w: w,
+        cape_pos: Vec::new(),
+        cape_tris: Vec::new(),
+        cape_w: Vec::new(),
+    }))
+    .unwrap();
+    let a = &m.skel.anatomy;
+    assert_eq!(a.body, Body::Quadruped, "notes: {:?}", a.notes);
+    assert_eq!(a.roles.get("neck").unwrap().iter().map(|&j| m.skel.names[j].as_str()).collect::<Vec<_>>(), ["DEF-neck"]);
+    assert_eq!(a.roles.get("head").unwrap().iter().map(|&j| m.skel.names[j].as_str()).collect::<Vec<_>>(), ["DEF-head"]);
+    assert!(a.roles.contains_key("thigh.L") && a.roles.contains_key("thigh.R"), "roles: {:?}", a.roles.keys());
+    assert!(a.roles.contains_key("tail*"), "roles: {:?}", a.roles.keys());
+    assert_eq!(a.group[m.skel.joint_by_name("DEF-tail.001").unwrap()], weightforge_core::anatomy::Group::Tail);
+    assert_eq!(a.group[m.skel.joint_by_name("DEF-spine.003").unwrap()], weightforge_core::anatomy::Group::Torso);
+}
+
+#[test]
+fn deep_55_to_107_bone_creatures_use_conservative_chain_rom_without_over_rotation() {
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    // Build a 64-bone winged + horned + jawed + deep-tailed creature (Body::Legged):
+    // spine (4), neck (4), head (1), jaw (1), 2 horns x 3, 2 eyes (2),
+    // tail (10), 2 legs x 3 (6), 2 wings x (4 arm + 3*4=12 feathers) = 62 joints.
+    let mut bones = Vec::new();
+    let mut pos = Vec::new();
+    let mut tris = Vec::new();
+    let mut w = Vec::new();
+    let mut add_chain = |pts: &[Vec3], names: Vec<String>, parent: Option<usize>, rx: f64, ry: f64| -> Vec<usize> {
+        let mut ids = Vec::new();
+        let mut p = parent;
+        for i in 0..pts.len() - 1 {
+            let id = bones.len();
+            bones.push(Bone { name: leak(names[i].clone()), parent: p, head: pts[i], tail: pts[i + 1] });
+            ids.push(id);
+            p = Some(id);
+        }
+        let mut chain_w = Vec::new();
+        let mut acc = 0.0;
+        for (idx, &id) in ids.iter().enumerate() {
+            chain_w.push((id as u32, acc));
+            acc += (pts[idx + 1] - pts[idx]).len();
+        }
+        add_tube(&mut pos, &mut tris, &mut w, pts, v3(1.0, 0.0, 0.0), 0.04, 10, rx, ry, &chain_w, 0.03);
+        ids
+    };
+
+    let spine_pts = [v3(0.0, 0.60, -0.20), v3(0.0, 0.61, -0.05), v3(0.0, 0.62, 0.10), v3(0.0, 0.63, 0.25), v3(0.0, 0.64, 0.40)];
+    let spine = add_chain(&spine_pts, (0..4).map(|i| format!("spine_{i}")).collect(), None, 0.14, 0.12);
+    let neck_pts = [v3(0.0, 0.64, 0.40), v3(0.0, 0.72, 0.48), v3(0.0, 0.80, 0.56), v3(0.0, 0.88, 0.64), v3(0.0, 0.94, 0.70)];
+    let neck = add_chain(&neck_pts, (0..4).map(|i| format!("neck_{i}")).collect(), Some(spine[3]), 0.07, 0.07);
+    let head = add_chain(&[v3(0.0, 0.94, 0.70), v3(0.0, 0.95, 0.92)], vec!["head".into()], Some(neck[3]), 0.09, 0.09)[0];
+    let _jaw = add_chain(&[v3(0.0, 0.89, 0.74), v3(0.0, 0.86, 0.90)], vec!["jaw".into()], Some(head), 0.05, 0.03)[0];
+    for (side, sx) in [("L", 1.0), ("R", -1.0)] {
+        let _eye =
+            add_chain(&[v3(0.05 * sx, 0.97, 0.82), v3(0.06 * sx, 0.97, 0.86)], vec![format!("eye.{side}")], Some(head), 0.02, 0.02)[0];
+        let horn_pts = [v3(0.04 * sx, 1.00, 0.74), v3(0.08 * sx, 1.08, 0.70), v3(0.11 * sx, 1.15, 0.65), v3(0.13 * sx, 1.22, 0.60)];
+        add_chain(&horn_pts, (0..3).map(|i| format!("horn_{i}.{side}")).collect(), Some(head), 0.02, 0.02);
+    }
+    let tail_pts: Vec<Vec3> = (0..=10).map(|i| v3(0.0, 0.58 - i as f64 * 0.02, -0.20 - i as f64 * 0.10)).collect();
+    add_chain(&tail_pts, (0..10).map(|i| format!("tail_{i}")).collect(), Some(spine[0]), 0.04, 0.04);
+    for (side, sx) in [("L", 1.0), ("R", -1.0)] {
+        let leg_pts = [v3(0.12 * sx, 0.58, -0.10), v3(0.12 * sx, 0.30, -0.12), v3(0.12 * sx, 0.04, -0.10), v3(0.12 * sx, 0.02, 0.02)];
+        add_chain(&leg_pts, (0..3).map(|i| format!("leg_{i}.{side}")).collect(), Some(spine[0]), 0.045, 0.045);
+        let wing_pts = [
+            v3(0.12 * sx, 0.66, 0.25),
+            v3(0.32 * sx, 0.68, 0.23),
+            v3(0.54 * sx, 0.70, 0.20),
+            v3(0.76 * sx, 0.70, 0.17),
+            v3(0.95 * sx, 0.69, 0.14),
+        ];
+        let wing = add_chain(&wing_pts, (0..4).map(|i| format!("wing_{i}.{side}")).collect(), Some(spine[2]), 0.04, 0.02);
+        for f in 0..12 {
+            let z_off = 0.04 * (f as f64 + 1.0);
+            let bx = (0.30 + 0.055 * f as f64) * sx;
+            add_chain(
+                &[v3(bx, 0.68, 0.20 - z_off * 0.3), v3(bx + 0.04 * sx, 0.67, 0.12 - z_off)],
+                vec![format!("feather_{f}.{side}")],
+                Some(wing[(f / 3).min(wing.len() - 1)]),
+                0.018,
+                0.008,
+            );
+        }
+    }
+    assert!(bones.len() >= 55 && bones.len() <= 107, "bone count={}", bones.len());
+    let path = temp_path("winged_creature_60bones.glb");
+    std::fs::write(
+        &path,
+        to_glb(&Fixture {
+            bones,
+            body_pos: pos,
+            body_tris: tris,
+            body_w: w,
+            cape_pos: Vec::new(),
+            cape_tris: Vec::new(),
+            cape_w: Vec::new(),
+        })
+        .to_bytes(),
+    )
+    .unwrap();
+    let checked = check_full(&path, &CtxOpts::default(), &MotionSpec::default()).unwrap();
+    assert_eq!(checked.model.skel.anatomy.body, Body::Legged);
+    assert!(checked.model.skel.anatomy.roles.contains_key("wing*.L"));
+    assert!(checked.model.skel.anatomy.roles.contains_key("jaw"));
+    // Every pose must remain conservative (no 45-degree per-bone sweeps on horns/eyes/feathers).
+    for p in &checked.ctx.poses {
+        for &(j, _, rad) in &p.moves {
+            let bname = &checked.model.skel.names[j];
+            assert!(
+                !bname.contains("horn") && !bname.contains("eye") && !bname.contains("feather"),
+                "protected bone {bname} posed in {}",
+                p.name
+            );
+            assert!(rad.to_degrees().abs() <= 36.0 + 1e-6, "pose {} over-rotated {bname} by {:.1} deg", p.name, rad.to_degrees());
+        }
+    }
+    let poses_sec = checked.rep.headline.iter().find(|s| s.name == "poses").unwrap();
+    assert_eq!(poses_sec.tears_pct, 0.0, "clean 60+ bone creature had pose tears: {:?}", poses_sec.findings);
+
+    // Built-in creature gait synthesis produces walk, trot, lunge, attack clips on deep creatures cleanly.
+    let gaits = check_full_with_gait(&path, &CtxOpts::default(), &MotionSpec::default(), true).unwrap();
+    let clip_sec = gaits.rep.headline.iter().find(|s| s.name == "game clips").unwrap();
+    assert_eq!(clip_sec.clips, vec!["walk", "trot", "lunge", "attack"]);
+    assert_eq!(clip_sec.tears_pct, 0.0, "clean creature had gait clip tears: {:?}", clip_sec.findings);
+
+    // Also test a deep 75-bone legless serpentine creature (`Body::Other`) -> zero 45-deg kinks & 0% tears.
+    let mut s_bones = Vec::new();
+    let mut s_pts = Vec::new();
+    let mut s_chain = Vec::new();
+    for i in 0..75 {
+        s_pts.push(v3(0.0, 0.30, 1.5 - i as f64 * 0.05));
+    }
+    for i in 0..74 {
+        s_bones.push(Bone {
+            name: leak(format!("spine_seg_{i:02}")),
+            parent: if i == 0 { None } else { Some(i - 1) },
+            head: s_pts[i],
+            tail: s_pts[i + 1],
+        });
+        s_chain.push((i as u32, i as f64 * 0.05));
+    }
+    let mut spos = Vec::new();
+    let mut stris = Vec::new();
+    let mut sw = Vec::new();
+    add_tube(&mut spos, &mut stris, &mut sw, &s_pts, v3(1.0, 0.0, 0.0), 0.04, 10, 0.08, 0.08, &s_chain, 0.02);
+    let spath = temp_path("serpent_75bones.glb");
+    std::fs::write(
+        &spath,
+        to_glb(&Fixture {
+            bones: s_bones,
+            body_pos: spos,
+            body_tris: stris,
+            body_w: sw,
+            cape_pos: Vec::new(),
+            cape_tris: Vec::new(),
+            cape_w: Vec::new(),
+        })
+        .to_bytes(),
+    )
+    .unwrap();
+    let scheck = check_full(&spath, &CtxOpts::default(), &MotionSpec::default()).unwrap();
+    assert_eq!(scheck.model.skel.anatomy.body, Body::Other);
+    for p in &scheck.ctx.poses {
+        for &(j, _, rad) in &p.moves {
+            let max_deg = if p.name.starts_with("head_") || j == 0 { 25.0 } else { 18.0 };
+            assert!(
+                rad.to_degrees().abs() <= max_deg + 1e-6,
+                "serpent pose {} bone {} over-rotated by {:.1} deg",
+                p.name,
+                scheck.model.skel.names[j],
+                rad.to_degrees()
+            );
+        }
+    }
+    assert_eq!(scheck.rep.headline.iter().find(|s| s.name == "poses").unwrap().tears_pct, 0.0);
 }

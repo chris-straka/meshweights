@@ -1,0 +1,40 @@
+// weightforge multi-limb creature range-of-motion set.
+//
+// Torso, neck, head, and tail moves for multi-legged / radial creatures;
+// leg and radial limb chains are added structurally per detected leg or
+// tentacle chain in `poses::legged_set` / `poses::conservative_creature`.
+PoseSet(
+    name: "multi_limb",
+    poses: [
+        PoseSpec(name: "body_arch", moves: [
+            Move(bone: "spine*", motion: Bend(Up, 18)),
+        ]),
+        PoseSpec(name: "body_sag", moves: [
+            Move(bone: "spine*", motion: Bend(Down, 15)),
+        ]),
+        PoseSpec(name: "body_side", mirror: true, moves: [
+            Move(bone: "spine*", motion: Bend(Left, 20)),
+        ]),
+        PoseSpec(name: "body_twist", moves: [
+            Move(bone: "spine*", motion: Twist(15)),
+        ]),
+        PoseSpec(name: "neck_up", moves: [
+            Move(bone: "neck*", motion: Bend(Up, 20)),
+        ]),
+        PoseSpec(name: "neck_down", moves: [
+            Move(bone: "neck*", motion: Bend(Down, 20)),
+        ]),
+        PoseSpec(name: "neck_side", mirror: true, moves: [
+            Move(bone: "neck*", motion: Bend(Left, 20)),
+        ]),
+        PoseSpec(name: "head_turn", mirror: true, moves: [
+            Move(bone: "head", motion: Twist(22)),
+        ]),
+        PoseSpec(name: "tail_side", mirror: true, moves: [
+            Move(bone: "tail*", motion: Bend(Left, 30)),
+        ]),
+        PoseSpec(name: "tail_up", moves: [
+            Move(bone: "tail*", motion: Bend(Up, 25)),
+        ]),
+    ],
+)

@@ -16,11 +16,11 @@ weights — skin-weight QA and repair for rigged GLB characters
 
 USAGE:
   weights check   <in.glb> [--motion hero.glb] [--motion-clips walk,run,...] [--poses rom.ron]
-                  [--json] [--no-clips] [--voxels N] [--vertex-json flags.json]
+                  [--gait] [--json] [--no-clips] [--voxels N] [--vertex-json flags.json]
   weights fix     <in.glb> --out <fixed.glb> [--method auto|smooth|geodesic|transfer|optimize]
                   [--source base.glb] [--candidate other.glb]... [--skintokens]
                   [--all-regions] [--sheet before_after.png] [--motion hero.glb]
-                  [--motion-clips ...] [--no-headline-guard]
+                  [--motion-clips ...] [--gait] [--no-headline-guard]
   weights show    <in.glb> --out <dir> [--motion hero.glb] [--motion-clips ...] [--kind K,...]
                   [--top N]   (a close-up sheet per headline finding)
   weights before-after <before.glb> <after.glb> --out <dir> --motion hero.glb [--top N]
@@ -32,7 +32,7 @@ USAGE:
                   [--poses-b rom_b.ron]
   weights probe   <in.glb> --out <dir> [--poses rom.ron] [--number-from N]
   weights blind   <a.glb> <b.glb> --out <dir> [--motion hero.glb] [--motion-clips ...]
-                  [--seed N] [--top N] [--key key.json] [--camera follow|talk]
+                  [--gait] [--seed N] [--top N] [--key key.json] [--camera follow|talk]
                   [--metrics metrics.ron] [--through]
                   (same-frame blind pairs per claim, at the game camera: the
                   follow camera's lens and distance from --metrics or $METRICS_FILE;
@@ -61,6 +61,8 @@ CHECK:
   --motion-clips   which clips, comma-separated (default with --motion:
                    walk,run,attack_1,dodge,hit,death; without: all the
                    file's own)
+  --gait           on clip-less non-humanoids without --motion, play built-in
+                   neutral locomotion clips (walk, trot, lunge, attack)
 
 CLOSENESS:
   The benchmark's main score: test.glb's weights against a professional
@@ -174,10 +176,12 @@ EXIT: 0 clean (fix: output passes), 1 faults found, 2 usage/IO error.
 fn flags_of(cmd: &str) -> Option<Vec<&'static str>> {
     const CTX: [&str; 3] = ["--poses", "--no-clips", "--voxels"];
     let own: &[&str] = match cmd {
-        "check" => &["--json", "--vertex-json", "--motion", "--motion-clips"],
+        "check" => &["--json", "--vertex-json", "--motion", "--motion-clips", "--gait"],
         "sheet" => &["--out", "--cols"],
         "probe" => &["--out", "--number-from"],
-        "blind" => &["--out", "--motion", "--motion-clips", "--kind", "--top", "--seed", "--key", "--camera", "--metrics", "--through"],
+        "blind" => {
+            &["--out", "--motion", "--motion-clips", "--gait", "--kind", "--top", "--seed", "--key", "--camera", "--metrics", "--through"]
+        }
         "blind-score" => &["--answers", "--key"],
         "show" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
         "before-after" => &["--out", "--motion", "--motion-clips", "--kind", "--top"],
@@ -194,6 +198,7 @@ fn flags_of(cmd: &str) -> Option<Vec<&'static str>> {
             "--sheet",
             "--motion",
             "--motion-clips",
+            "--gait",
             "--no-headline-guard",
         ],
         "dump" | "fixture" => return Some(vec!["--out"]),

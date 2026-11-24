@@ -112,7 +112,12 @@ pub fn cmd_fix(a: &Args) -> ExitCode {
             for n in notes {
                 eprintln!("weights: {n}");
             }
-            None
+            if a.has("--gait") && spec.source.is_none() && model.skel.anatomy.body != wf::anatomy::Body::Humanoid {
+                let gm = wf::motion::creature_gait_clips(&model, wf::motion::FPS);
+                (!gm.poses.is_empty()).then(|| ctx.with_poses(&model, gm.poses))
+            } else {
+                None
+            }
         }
         Err(e) => return fail(format!("--motion: {e}")),
     };

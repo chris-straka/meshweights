@@ -68,13 +68,26 @@ pub struct Checked {
 /// clips (the file's own, or `spec.source`'s put on this rig) as a second
 /// group, and the owner-eye findings of each (`owner.rs`).
 pub fn check_full(path: &Path, opts: &metrics::CtxOpts, spec: &MotionSpec) -> glb::Result<Checked> {
+    check_full_with_gait(path, opts, spec, false)
+}
+
+/// Like [`check_full`], and when `gait_fallback` is true on a non-humanoid
+/// carrying neither `--motion` nor its own clips, synthesizes conservative
+/// creature gait clips (`walk`, `trot`, `lunge`, `attack`).
+pub fn check_full_with_gait(path: &Path, opts: &metrics::CtxOpts, spec: &MotionSpec, gait_fallback: bool) -> glb::Result<Checked> {
     let model = scene::Model::load(path)?;
     let rom = metrics::CtxOpts { clips: false, poses: opts.poses, th: opts.th.clone(), ..*opts };
     let ctx = metrics::Ctx::new(&model, &rom);
     let ev = metrics::evaluate(&model, &ctx, &model.weights);
     let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let mut rep = report::build(&name, &model, &ctx, &ev);
-    let (mv, mut notes) = motion_for(&model, opts.clips, spec)?;
+    let (mut mv, mut notes) = motion_for(&model, opts.clips, spec)?;
+    if mv.is_none() && gait_fallback && spec.source.is_none() && model.skel.anatomy.body != anatomy::Body::Humanoid {
+        let gm = motion::creature_gait_clips(&model, motion::FPS);
+        if !gm.poses.is_empty() {
+            mv = Some(gm);
+        }
+    }
     let mut motion_out = None;
     if let Some(m) = mv {
         notes.extend(m.skipped.iter().map(|s| format!("clip not played: {s}")));

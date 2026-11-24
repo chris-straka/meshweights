@@ -1,0 +1,56 @@
+// weightforge winged creature range-of-motion set.
+//
+// Roles come from structural anatomy (`anatomy.rs`): wing*.L/R and
+// wing_mid.L/R spread wing arcs smoothly over primary joints without
+// twisting individual feather bones. Angles stay conservative for
+// deep 55-107 bone artist and generated creature rigs.
+PoseSet(
+    name: "winged",
+    poses: [
+        PoseSpec(name: "wing_up", mirror: true, moves: [
+            Move(bone: "wing*.L", motion: Bend(Up, 35)),
+        ]),
+        PoseSpec(name: "wing_down", mirror: true, moves: [
+            Move(bone: "wing*.L", motion: Bend(Down, 30)),
+        ]),
+        PoseSpec(name: "wing_forward", mirror: true, moves: [
+            Move(bone: "wing*.L", motion: Bend(Forward, 20)),
+        ]),
+        PoseSpec(name: "wing_back", mirror: true, moves: [
+            Move(bone: "wing*.L", motion: Bend(Back, 25)),
+        ]),
+        PoseSpec(name: "wing_fold", mirror: true, moves: [
+            Move(bone: "wing_mid.L", motion: Bend(In, 35)),
+        ]),
+        PoseSpec(name: "spine_arch", moves: [
+            Move(bone: "spine*", motion: Bend(Up, 18)),
+        ]),
+        PoseSpec(name: "spine_sag", moves: [
+            Move(bone: "spine*", motion: Bend(Down, 15)),
+        ]),
+        PoseSpec(name: "spine_side", mirror: true, moves: [
+            Move(bone: "spine*", motion: Bend(Left, 20)),
+        ]),
+        PoseSpec(name: "spine_twist", moves: [
+            Move(bone: "spine*", motion: Twist(15)),
+        ]),
+        PoseSpec(name: "neck_up", moves: [
+            Move(bone: "neck*", motion: Bend(Up, 22)),
+        ]),
+        PoseSpec(name: "neck_down", moves: [
+            Move(bone: "neck*", motion: Bend(Down, 25)),
+        ]),
+        PoseSpec(name: "neck_side", mirror: true, moves: [
+            Move(bone: "neck*", motion: Bend(Left, 25)),
+        ]),
+        PoseSpec(name: "head_turn", mirror: true, moves: [
+            Move(bone: "head", motion: Twist(25)),
+        ]),
+        PoseSpec(name: "tail_side", mirror: true, moves: [
+            Move(bone: "tail*", motion: Bend(Left, 30)),
+        ]),
+        PoseSpec(name: "tail_up", moves: [
+            Move(bone: "tail*", motion: Bend(Up, 25)),
+        ]),
+    ],
+)

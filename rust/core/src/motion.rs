@@ -79,7 +79,7 @@ fn role_map(src: &Model, dst: &Model) -> Vec<(usize, usize)> {
         if role.starts_with("fingers") || sj.is_empty() || dj.is_empty() {
             continue;
         }
-        if role.ends_with('*') || role == "neck" {
+        if crate::anatomy::is_chain_role(role) || role == "neck" {
             let (m, k) = (dj.len(), sj.len());
             for (i, &d) in dj.iter().enumerate() {
                 let f = (i + 1) as f64 / m as f64;
@@ -150,7 +150,7 @@ pub fn transfer(src: &Model, src_name: &str, dst: &Model, names: &[String], fps:
             return Err(format!("the clips are for a {} body and this is a {} one", bs.as_str(), bd.as_str()));
         }
         let map = role_map(src, dst);
-        let min_bones = if bd == Body::Legged { 4 } else { 8 };
+        let min_bones = if bd == Body::Humanoid { 8 } else { 4 };
         if map.len() < min_bones {
             return Err(format!("only {} bones in common by role", map.len()));
         }
@@ -162,9 +162,26 @@ pub fn transfer(src: &Model, src_name: &str, dst: &Model, names: &[String], fps:
         // Rest alignment for limbs (the spine and hips keep the target's own
         // rest shape).
         let limb = |role: &str| {
-            ["shoulder", "upper_arm", "forearm", "hand", "thigh", "shin", "foot", "toe", "neck", "head", "leg", "tail"]
-                .iter()
-                .any(|r| role.starts_with(r))
+            [
+                "shoulder",
+                "upper_arm",
+                "forearm",
+                "hand",
+                "thigh",
+                "shin",
+                "foot",
+                "toe",
+                "neck",
+                "head",
+                "leg",
+                "tail",
+                "wing",
+                "fin",
+                "jaw",
+                "limb",
+            ]
+            .iter()
+            .any(|r| role.starts_with(r))
         };
         let role_of: BTreeMap<usize, String> =
             dst.skel.anatomy.roles.iter().flat_map(|(r, js)| js.iter().map(move |&j| (j, r.clone()))).collect();
@@ -236,6 +253,197 @@ pub fn transfer(src: &Model, src_name: &str, dst: &Model, names: &[String], fps:
         }
     }
     Ok(out)
+}
+
+/// Neutral procedural locomotion clips (`walk`, `trot`, `lunge`, `attack`) for
+/// non-humanoid rigs whose GLB carries no animations, keyed from structural
+/// anatomy (`quadruped`, `winged`, `multi_limb`, or axial swimming/serpentine).
+pub fn creature_gait_clips(model: &Model, fps: f64) -> Motion {
+    let mut out = Motion { poses: Vec::new(), clips: Vec::new(), source: "creature-gait".into(), skipped: Vec::new() };
+    let sk = &model.skel;
+    if sk.anatomy.body == Body::Humanoid || !fps.is_finite() || fps <= 0.0 {
+        return out;
+    }
+    let up = v3(0.0, 1.0, 0.0);
+    let fwd = if sk.anatomy.forward.len2() > 0.0 { sk.anatomy.forward } else { v3(0.0, 0.0, 1.0) };
+    let left = up.cross(fwd).normalized();
+    let roles = &sk.anatomy.roles;
+
+    let bend_to = |j: usize, target: Vec3, deg: f64| -> Option<(usize, Vec3, f64)> {
+        let d = (sk.tail[j] - sk.head[j]).normalized();
+        if d.len2() == 0.0 {
+            return None;
+        }
+        let ax = d.cross(target);
+        if ax.len() < 0.15 { None } else { Some((j, ax.normalized(), deg.to_radians())) }
+    };
+    let push_chain = |moves: &mut Vec<(usize, Vec3, f64)>, role: &str, target: Vec3, total_deg: f64| {
+        let Some(js) = roles.get(role) else { return };
+        let share = js.len().max(1) as f64;
+        for &j in js {
+            if let Some(m) = bend_to(j, target, total_deg / share) {
+                moves.push(m);
+            }
+        }
+    };
+    let push_head_role = |moves: &mut Vec<(usize, Vec3, f64)>, role: &str, target: Vec3, total_deg: f64| {
+        if let Some(js) = roles.get(role)
+            && let Some(&j) = js.first()
+            && let Some(m) = bend_to(j, target, total_deg)
+        {
+            moves.push(m);
+        }
+    };
+
+    let sample_cycle = |clip: &str, dur: f64, f: &dyn Fn(f64) -> Vec<(usize, Vec3, f64)>, out: &mut Motion| {
+        let n = ((dur * fps).floor().clamp(2.0, 120.0)) as usize;
+        let mut added = 0usize;
+        for i in 0..=n {
+            let t = dur * i as f64 / n as f64;
+            let ph = i as f64 / n as f64;
+            let moves = f(ph);
+            if !moves.is_empty() {
+                out.poses.push(Pose { name: format!("{clip}@{t:.2}s"), moves, locals: Vec::new() });
+                added += 1;
+            }
+        }
+        if added > 0 {
+            out.clips.push(clip.into());
+        }
+    };
+
+    let multi_legs: Vec<(usize, String, String)> = roles
+        .keys()
+        .filter_map(|r| {
+            let base = r.strip_suffix("_upper.L").or_else(|| r.strip_suffix("_upper.R"))?;
+            let idx = base.strip_prefix("leg")?.parse::<usize>().ok()?;
+            let side = r[r.len() - 1..].to_string();
+            Some((idx, side, r.clone()))
+        })
+        .collect();
+
+    for (clip, dur, stride_deg, spine_deg) in [("walk", 0.8, 22.0, 8.0), ("trot", 0.6, 28.0, 12.0)] {
+        sample_cycle(
+            clip,
+            dur,
+            &|ph| {
+                let s = (std::f64::consts::TAU * ph).sin();
+                let mut moves = Vec::new();
+                match sk.anatomy.body {
+                    Body::Quadruped => {
+                        push_head_role(&mut moves, "upper_arm.L", fwd, stride_deg * s);
+                        push_head_role(&mut moves, "upper_arm.R", fwd, -stride_deg * s);
+                        push_head_role(&mut moves, "thigh.R", fwd, 0.9 * stride_deg * s);
+                        push_head_role(&mut moves, "thigh.L", fwd, -0.9 * stride_deg * s);
+                        if s < 0.0 {
+                            push_head_role(&mut moves, "forearm.L", -fwd, 28.0 * (-s));
+                            push_head_role(&mut moves, "shin.R", -fwd, 25.0 * (-s));
+                        } else {
+                            push_head_role(&mut moves, "forearm.R", -fwd, 28.0 * s);
+                            push_head_role(&mut moves, "shin.L", -fwd, 25.0 * s);
+                        }
+                        push_chain(&mut moves, "spine*", left, spine_deg * s);
+                        push_chain(&mut moves, "tail*", -left, 14.0 * s);
+                    }
+                    Body::Legged => {
+                        for (idx, side, role) in &multi_legs {
+                            let alt = if (idx % 2 == 0) ^ (side == "R") { 1.0 } else { -1.0 };
+                            push_head_role(&mut moves, role, fwd, stride_deg * 0.75 * alt * s);
+                        }
+                        push_chain(&mut moves, "wing*.L", up, 24.0 * s);
+                        push_chain(&mut moves, "wing*.R", up, -20.0 * s);
+                        push_chain(&mut moves, "spine*", left, spine_deg * s);
+                        push_chain(&mut moves, "tail*", -left, 12.0 * s);
+                    }
+                    Body::Other => {
+                        push_chain(&mut moves, "spine*", left, 18.0 * s);
+                        push_chain(&mut moves, "tail*", -left, 24.0 * s);
+                        push_chain(&mut moves, "fin*.L", -fwd, 16.0 * s);
+                        push_chain(&mut moves, "fin*.R", -fwd, -16.0 * s);
+                        for (r, js) in roles {
+                            if r.starts_with("limb") && crate::anatomy::is_chain_role(r) {
+                                let alt = if r.as_bytes().get(4).is_some_and(|b| b % 2 == 0) { 1.0 } else { -1.0 };
+                                let share = js.len().max(1) as f64;
+                                for &j in js {
+                                    if let Some(m) = bend_to(j, up, 22.0 * alt * s / share) {
+                                        moves.push(m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Body::Humanoid => {}
+                }
+                moves
+            },
+            &mut out,
+        );
+    }
+
+    sample_cycle(
+        "lunge",
+        0.5,
+        &|ph| {
+            let p = (std::f64::consts::PI * ph).sin();
+            let mut moves = Vec::new();
+            match sk.anatomy.body {
+                Body::Quadruped => {
+                    push_head_role(&mut moves, "upper_arm.L", -fwd, 16.0 * p);
+                    push_head_role(&mut moves, "upper_arm.R", -fwd, 16.0 * p);
+                    push_head_role(&mut moves, "forearm.L", -fwd, 30.0 * p);
+                    push_head_role(&mut moves, "forearm.R", -fwd, 30.0 * p);
+                    push_head_role(&mut moves, "thigh.L", fwd, 20.0 * p);
+                    push_head_role(&mut moves, "thigh.R", fwd, 20.0 * p);
+                }
+                Body::Legged => {
+                    push_chain(&mut moves, "wing*.L", -fwd, 22.0 * p);
+                    push_chain(&mut moves, "wing*.R", -fwd, 22.0 * p);
+                }
+                Body::Other => {
+                    push_chain(&mut moves, "tail*", up, 18.0 * p);
+                }
+                Body::Humanoid => {}
+            }
+            push_chain(&mut moves, "spine*", -up, 12.0 * p);
+            push_chain(&mut moves, "neck", up, 14.0 * p);
+            push_head_role(&mut moves, "jaw", -up, 16.0 * p);
+            moves
+        },
+        &mut out,
+    );
+
+    sample_cycle(
+        "attack",
+        0.5,
+        &|ph| {
+            let p = (std::f64::consts::PI * ph).sin();
+            let mut moves = Vec::new();
+            match sk.anatomy.body {
+                Body::Quadruped => {
+                    push_head_role(&mut moves, "upper_arm.L", fwd, 32.0 * p);
+                    push_head_role(&mut moves, "upper_arm.R", -fwd, 18.0 * p);
+                    push_chain(&mut moves, "spine*", up, 12.0 * p);
+                }
+                Body::Legged => {
+                    if let Some((_, _, first)) = multi_legs.first() {
+                        push_head_role(&mut moves, first, fwd, 26.0 * p);
+                    }
+                    push_chain(&mut moves, "wing*.L", up, 26.0 * p);
+                    push_chain(&mut moves, "wing*.R", up, 26.0 * p);
+                }
+                Body::Other => {
+                    push_chain(&mut moves, "spine*", fwd, 14.0 * p);
+                }
+                Body::Humanoid => {}
+            }
+            push_chain(&mut moves, "neck", fwd, 18.0 * p);
+            push_head_role(&mut moves, "jaw", -up, 18.0 * p);
+            moves
+        },
+        &mut out,
+    );
+
+    out
 }
 
 #[cfg(test)]
