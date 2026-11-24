@@ -171,3 +171,47 @@ fn planted_candidates_swap_twist_helpers_and_dark_paint_clears_follow_rmse_gate(
     let rmse = (sq / ia.rgb.len() as f64).sqrt();
     assert!(rmse > 5.0, "dark-painted follow camera planted RMSE must exceed 5.0, got {rmse:.2}");
 }
+
+#[test]
+fn planted_candidates_prefer_opposite_phase_asymmetric_gait_over_symmetric_lunge() {
+    use weightforge_core::blind::{asymmetric_planted_pose, planted_candidates, swap_asymmetry};
+    use weightforge_core::math::{Quat, v3};
+    use weightforge_core::poses::Pose;
+
+    let m = load("clean");
+    let sk = &m.skel;
+    let ua_l = sk.joint_by_name("DEF-upper_arm.L").unwrap();
+    let ua_r = sk.joint_by_name("DEF-upper_arm.R").unwrap();
+    let sp1 = sk.joint_by_name("DEF-spine.001").unwrap();
+    let base_ctx = Ctx::new(&m, &CtxOpts { clips: false, ..Default::default() });
+    // Pose 0: high-amplitude symmetric attack lunge (both arms +42 deg forward + spine +20 deg forward).
+    let sym_attack = Pose {
+        name: "attack@0.50s".into(),
+        moves: vec![
+            (sp1, v3(1.0, 0.0, 0.0), 20f64.to_radians()),
+            (ua_l, v3(1.0, 0.0, 0.0), 42f64.to_radians()),
+            (ua_r, v3(1.0, 0.0, 0.0), 42f64.to_radians()),
+        ],
+        locals: Vec::new(),
+    };
+    // Pose 1: opposite-phase trot stride (arm.L forward +30, arm.R back -25).
+    let opp_trot = Pose {
+        name: "trot@0.25s".into(),
+        moves: vec![(ua_l, v3(1.0, 0.0, 0.0), 30f64.to_radians()), (ua_r, v3(1.0, 0.0, 0.0), -25f64.to_radians())],
+        locals: Vec::new(),
+    };
+    let sym_ctx = base_ctx.with_poses(&m, vec![sym_attack.clone(), opp_trot]);
+    let cands = planted_candidates(&m, &sym_ctx, true);
+    assert!(!cands.is_empty());
+    let arm_cand = &cands[0];
+    let sym_asym = swap_asymmetry(&m, &sym_ctx.mats[0], &arm_cand.swap);
+    let opp_asym = swap_asymmetry(&m, &sym_ctx.mats[1], &arm_cand.swap);
+    assert!(opp_asym > sym_asym * 3.0 && opp_asym > 0.2, "opp={opp_asym:.3} vs sym={sym_asym:.3}");
+    assert_eq!(arm_cand.pose, 1, "planted candidate should pick opposite-phase trot over symmetric lunge");
+
+    // When only symmetric poses are supplied, asymmetric_planted_pose synthesizes an upright opposite stride.
+    let synth = asymmetric_planted_pose(&m, &arm_cand.swap).expect("asymmetric stride pose");
+    let synth_ctx = base_ctx.with_poses(&m, vec![synth]);
+    assert!(swap_asymmetry(&m, &synth_ctx.mats[0], &arm_cand.swap) > 0.2);
+    let _ = Quat::IDENTITY;
+}

@@ -52,10 +52,12 @@ pub fn cmd_blind(a: &Args) -> ExitCode {
         Err(e) => return fail(e),
     };
     let spec = motion_spec(a);
-    let (ca, cb) = match (wf::check_full(Path::new(pa), &opts, &spec), wf::check_full(Path::new(pb), &opts, &spec)) {
-        (Ok(x), Ok(y)) => (x, y),
-        (Err(e), _) | (_, Err(e)) => return fail(e),
-    };
+    let gait = a.has("--gait");
+    let (ca, cb) =
+        match (wf::check_full_with_gait(Path::new(pa), &opts, &spec, gait), wf::check_full_with_gait(Path::new(pb), &opts, &spec, gait)) {
+            (Ok(x), Ok(y)) => (x, y),
+            (Err(e), _) | (_, Err(e)) => return fail(e),
+        };
     let use_clips = match (&ca.motion, &cb.motion) {
         (Some(x), Some(y)) => x.0.poses.len() == y.0.poses.len() && !x.0.poses.is_empty(),
         _ => false,
@@ -172,18 +174,22 @@ pub fn cmd_blind(a: &Args) -> ExitCode {
     let sa = wf::blind::BlindSide { model: &ca.model, ctx: ctxa, weights: &ca.model.weights, paint: &paint_a };
     let sb = wf::blind::BlindSide { model: &cb.model, ctx: ctxb, weights: &cb.model.weights, paint: &paint_b };
 
-    let render_triple = |planted_w: &wf::scene::Weights,
-                         pose: usize,
-                         view_src: usize,
-                         marked_idxs: &[u32]|
+    let render_triple_with = |sctx_a: &wf::metrics::Ctx,
+                              sctx_b: &wf::metrics::Ctx,
+                              planted_w: &wf::scene::Weights,
+                              pose: usize,
+                              view_src: usize,
+                              marked_idxs: &[u32]|
      -> (wf::render::Image, wf::render::Image, wf::render::Image, f64) {
-        let sp = wf::blind::BlindSide { model: &ca.model, ctx: ctxa, weights: planted_w, paint: &paint_a };
+        let sa_side = wf::blind::BlindSide { model: &ca.model, ctx: sctx_a, weights: &ca.model.weights, paint: &paint_a };
+        let sb_side = wf::blind::BlindSide { model: &cb.model, ctx: sctx_b, weights: &cb.model.weights, paint: &paint_b };
+        let sp_side = wf::blind::BlindSide { model: &ca.model, ctx: sctx_a, weights: planted_w, paint: &paint_a };
         let vs = if view_src == 1 {
-            &sb
+            &sb_side
         } else if view_src == 2 {
-            &sp
+            &sp_side
         } else {
-            &sa
+            &sa_side
         };
         let src_model = if view_src == 1 { &cb.model } else { &ca.model };
         let mut marked = vec![false; vs.model.nverts()];
@@ -199,11 +205,11 @@ pub fn cmd_blind(a: &Args) -> ExitCode {
                 wf::skin::lbs(s.model, &s.ctx.mats[pose.min(s.ctx.mats.len() - 1)], s.weights)
             }
         };
-        let (pa_p, pb_p) = (posed(&sa), posed(&sb));
+        let (pa_p, pb_p) = (posed(&sa_side), posed(&sb_side));
         let (view, fit) = match camera {
             wf::blind::Camera::Follow => {
                 let view = wf::blind::claim_view(vs, pose, &marked);
-                let fit = wf::blind::game_fit(&view, &[&pa_p, &pb_p], wf::owner::height(sa.model), 520, 640, share);
+                let fit = wf::blind::game_fit(&view, &[&pa_p, &pb_p], wf::owner::height(sa_side.model), 520, 640, share);
                 (view, fit)
             }
             wf::blind::Camera::Talk => {
@@ -217,12 +223,16 @@ pub fn cmd_blind(a: &Args) -> ExitCode {
                 (view, fit)
             }
         };
-        let img_a = wf::blind::cell_image(&sa, pose, &view, fit, 520, 640, "");
-        let img_b = wf::blind::cell_image(&sb, pose, &view, fit, 520, 640, "");
-        let img_p = wf::blind::cell_image(&sp, pose, &view, fit, 520, 640, "");
+        let img_a = wf::blind::cell_image(&sa_side, pose, &view, fit, 520, 640, "");
+        let img_b = wf::blind::cell_image(&sb_side, pose, &view, fit, 520, 640, "");
+        let img_p = wf::blind::cell_image(&sp_side, pose, &view, fit, 520, 640, "");
         let rmse = image_rmse(&img_a, &img_p);
         (img_a, img_b, img_p, rmse)
     };
+    let render_triple = |planted_w: &wf::scene::Weights, pose: usize, view_src: usize, marked_idxs: &[u32]| {
+        render_triple_with(ctxa, ctxb, planted_w, pose, view_src, marked_idxs)
+    };
+    let _ = (&sa, &sb);
 
     let mut claim_items: Vec<Pending> = Vec::new();
     let score_w = winner_of("A", "B", ca.rep.score, cb.rep.score, 1.0, false);
@@ -285,106 +295,200 @@ pub fn cmd_blind(a: &Args) -> ExitCode {
         let _ = std::fs::remove_dir_all(s);
     };
 
-    // Ensure stage/a's first frame (paired by `gk blind make` with `--planted`) is upright when possible and visibly shows `PLANTED_A`.
+    let rest = &ca.model.rest;
+    let floor = rest.iter().map(|q| q.y).fold(f64::MAX, f64::min);
+    let h = wf::owner::height(&ca.model).max(1e-9);
+    let (talk_lo, _) = wf::blind::talk_frame_span();
+    let talk_verts: Vec<usize> = (0..rest.len()).filter(|&i| (rest[i].y - floor) / h >= talk_lo).collect();
+
+    struct PlantedPick<'a> {
+        cand: &'a wf::blind::PlantedCandidate,
+        pose: usize,
+        limg: wf::render::Image,
+        rimg: wf::render::Image,
+        pimg: wf::render::Image,
+        rmse: f64,
+        asym: f64,
+        score: f64,
+        frame: String,
+        custom_ctx: Option<(wf::metrics::Ctx, wf::metrics::Ctx)>,
+    }
+
+    let asym_weight = |rmse: f64, asym: f64| -> f64 { rmse * (0.25 + asym.min(0.60)) };
+    let mut best_pick: Option<PlantedPick<'_>> = None;
+    for cand in &planted_cands {
+        let focus_verts: Vec<usize> = match camera {
+            wf::blind::Camera::Talk => talk_verts.clone(),
+            wf::blind::Camera::Follow if !cand.vertices.is_empty() => cand.vertices.iter().map(|&v| v as usize).collect(),
+            wf::blind::Camera::Follow => (0..rest.len()).collect(),
+        };
+        let mut ranked_poses: Vec<(usize, f64)> = (0..ctxa.mats.len())
+            .filter(|&i| !any_upright || upright[i])
+            .map(|i| {
+                let mats = &ctxa.mats[i];
+                let d: f64 = focus_verts
+                    .iter()
+                    .filter_map(|&v| rest.get(v).zip(ca.model.weights.get(v)).zip(cand.weights.get(v)).map(|((r, wa), wp)| (r, wa, wp)))
+                    .map(|(&r, wa, wp)| {
+                        let pa = wf::skin::lbs_vertex(mats, wa, r);
+                        let pp = wf::skin::lbs_vertex(mats, wp, r);
+                        (pp - pa).len()
+                    })
+                    .sum();
+                let a_val = wf::blind::swap_asymmetry(&ca.model, mats, &cand.swap);
+                (i, d * (0.20 + a_val))
+            })
+            .collect();
+        ranked_poses.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut try_poses: Vec<usize> = ranked_poses.into_iter().take(6).map(|(p, _)| p).collect();
+        if (!any_upright || upright.get(cand.pose).copied().unwrap_or(false)) && !try_poses.contains(&cand.pose) {
+            try_poses.push(cand.pose);
+        }
+        for pose in try_poses {
+            let (limg, rimg, pimg, rmse) = render_triple(&cand.weights, pose, 2, &cand.vertices);
+            let asym = wf::blind::swap_asymmetry(&ca.model, &ctxa.mats[pose], &cand.swap);
+            let score = asym_weight(rmse, asym);
+            let replace = best_pick.as_ref().is_none_or(|b| {
+                let b_vis = b.rmse >= 8.0;
+                let n_vis = rmse >= 8.0;
+                match (b_vis, n_vis) {
+                    (false, true) => true,
+                    (true, false) => false,
+                    _ => score > b.score,
+                }
+            });
+            if replace {
+                let frame = ctxa.poses.get(pose).map(|p| p.name.clone()).unwrap_or_else(|| "rest".into());
+                best_pick = Some(PlantedPick { cand, pose, limg, rimg, pimg, rmse, asym, score, frame, custom_ctx: None });
+            }
+        }
+        if best_pick.as_ref().is_some_and(|b| b.rmse >= 12.0 && b.asym >= 0.12) {
+            break;
+        }
+    }
+
+    // If all input frames were mirror-symmetric (e.g. symmetric lunges only),
+    // synthesize an upright opposite-phase stride frame so swaps read clearly.
+    if best_pick.as_ref().is_none_or(|b| b.asym < 0.08 || b.rmse < 8.0) {
+        for cand in &planted_cands {
+            let Some(asym_pose) = wf::blind::asymmetric_planted_pose(&ca.model, &cand.swap) else {
+                continue;
+            };
+            let pose_b = if ca.model.skel.names == cb.model.skel.names {
+                asym_pose.clone()
+            } else {
+                let moves = asym_pose
+                    .moves
+                    .iter()
+                    .filter_map(|&(j, ax, ang)| {
+                        ca.model.skel.names.get(j).and_then(|nm| cb.model.skel.joint_by_name(nm)).map(|bj| (bj, ax, ang))
+                    })
+                    .collect();
+                wf::poses::Pose { name: asym_pose.name.clone(), moves, locals: Vec::new() }
+            };
+            let mut poses_a = ctxa.poses.clone();
+            let pose_idx = poses_a.len();
+            poses_a.push(asym_pose.clone());
+            let c_a = ctxa.with_poses(&ca.model, poses_a);
+            let mut poses_b = ctxb.poses.clone();
+            poses_b.push(pose_b);
+            let c_b = ctxb.with_poses(&cb.model, poses_b);
+            if wf::blind::is_upright_pose(&ca.model, &c_a.mats[pose_idx]) || !any_upright {
+                let (limg, rimg, pimg, rmse) = render_triple_with(&c_a, &c_b, &cand.weights, pose_idx, 2, &cand.vertices);
+                let asym = wf::blind::swap_asymmetry(&ca.model, &c_a.mats[pose_idx], &cand.swap);
+                let score = asym_weight(rmse, asym);
+                let replace = best_pick.as_ref().is_none_or(|b| (rmse >= 6.0 && b.rmse < 8.0) || score > b.score);
+                if replace {
+                    best_pick = Some(PlantedPick {
+                        cand,
+                        pose: pose_idx,
+                        limg,
+                        rimg,
+                        pimg,
+                        rmse,
+                        asym,
+                        score,
+                        frame: asym_pose.name.clone(),
+                        custom_ctx: Some((c_a, c_b)),
+                    });
+                    if rmse >= 12.0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Only reuse an existing claim frame for `planted` when it is upright, visible,
+    // and genuinely asymmetric relative to the best dedicated asymmetric frame.
+    let best_ded_score = best_pick.as_ref().map_or(0.0, |b| b.score);
+    let best_ded_asym = best_pick.as_ref().map_or(0.0, |b| b.asym);
     let best_claim_idx = claim_items
         .iter()
         .enumerate()
-        .filter(|(_, c)| (!any_upright || upright.get(c.pose).copied().unwrap_or(false)) && c.planted_rmse > 8.0)
-        .max_by(|(_, x), (_, y)| x.planted_rmse.total_cmp(&y.planted_rmse))
+        .filter_map(|(i, c)| {
+            if (any_upright && !upright.get(c.pose).copied().unwrap_or(false)) || c.planted_rmse <= 8.0 {
+                return None;
+            }
+            let casym = ctxa.mats.get(c.pose).map(|m| wf::blind::swap_asymmetry(&ca.model, m, &primary_planted.swap)).unwrap_or(0.0);
+            if casym < 0.08 && best_ded_asym >= 0.08 {
+                return None;
+            }
+            let cscore = asym_weight(c.planted_rmse, casym);
+            (cscore >= 0.85 * best_ded_score).then_some((i, cscore))
+        })
+        .max_by(|(_, x), (_, y)| x.total_cmp(y))
         .map(|(i, _)| i);
 
     let stage_planted = stage.join("planted.png");
-    let (chosen_planted, planted_frame): (&wf::blind::PlantedCandidate, String) = if let Some(idx) = best_claim_idx {
-        let tail = claim_items[idx].stem.get(4..).unwrap_or(&claim_items[idx].stem).to_string();
-        claim_items[idx].stem = format!("000_{tail}");
-        if let Err(e) = write_png(&stage_planted, &claim_items[idx].pimg) {
-            cleanup(&stage);
-            return fail(e);
-        }
-        (primary_planted, claim_items[idx].frame.clone())
-    } else {
-        let ta_all: f64 = (0..ca.model.nverts()).filter(|&v| torna[v]).map(|v| areaa[v] * ka * ka * 1e4).sum();
-        let tb_all: f64 = (0..cb.model.nverts()).filter(|&v| tornb[v]).map(|v| areab[v] * kb * kb * 1e4).sum();
-        let tw_all = winner_of("A", "B", ta_all, tb_all, 0.5, true);
-
-        let rest = &ca.model.rest;
-        let floor = rest.iter().map(|q| q.y).fold(f64::MAX, f64::min);
-        let h = wf::owner::height(&ca.model).max(1e-9);
-        let (talk_lo, _) = wf::blind::talk_frame_span();
-        let talk_verts: Vec<usize> = (0..rest.len()).filter(|&i| (rest[i].y - floor) / h >= talk_lo).collect();
-
-        let mut best_pick: Option<(&wf::blind::PlantedCandidate, usize, wf::render::Image, wf::render::Image, wf::render::Image, f64)> =
-            None;
-        for cand in &planted_cands {
-            let focus_verts: Vec<usize> = match camera {
-                wf::blind::Camera::Talk => talk_verts.clone(),
-                wf::blind::Camera::Follow if !cand.vertices.is_empty() => cand.vertices.iter().map(|&v| v as usize).collect(),
-                wf::blind::Camera::Follow => (0..rest.len()).collect(),
+    let (chosen_planted, planted_frame, custom_planted_ctx): (&wf::blind::PlantedCandidate, String, Option<wf::metrics::Ctx>) =
+        if let Some(idx) = best_claim_idx {
+            let tail = claim_items[idx].stem.get(4..).unwrap_or(&claim_items[idx].stem).to_string();
+            claim_items[idx].stem = format!("000_{tail}");
+            if let Err(e) = write_png(&stage_planted, &claim_items[idx].pimg) {
+                cleanup(&stage);
+                return fail(e);
+            }
+            (primary_planted, claim_items[idx].frame.clone(), None)
+        } else {
+            let Some(pick) = best_pick else {
+                cleanup(&stage);
+                return fail("blind: no pose available to render planted bad case");
             };
-            let mut ranked_poses: Vec<(usize, f64)> = (0..ctxa.mats.len())
-                .filter(|&i| !any_upright || upright[i])
-                .map(|i| {
-                    let mats = &ctxa.mats[i];
-                    let d: f64 = focus_verts
-                        .iter()
-                        .filter_map(|&v| rest.get(v).zip(ca.model.weights.get(v)).zip(cand.weights.get(v)).map(|((r, wa), wp)| (r, wa, wp)))
-                        .map(|(&r, wa, wp)| {
-                            let pa = wf::skin::lbs_vertex(mats, wa, r);
-                            let pp = wf::skin::lbs_vertex(mats, wp, r);
-                            (pp - pa).len()
-                        })
-                        .sum();
-                    (i, d)
-                })
-                .collect();
-            ranked_poses.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let mut try_poses: Vec<usize> = ranked_poses.into_iter().take(6).map(|(p, _)| p).collect();
-            if (!any_upright || upright.get(cand.pose).copied().unwrap_or(false)) && !try_poses.contains(&cand.pose) {
-                try_poses.push(cand.pose);
+            let ta_all: f64 = (0..ca.model.nverts()).filter(|&v| torna[v]).map(|v| areaa[v] * ka * ka * 1e4).sum();
+            let tb_all: f64 = (0..cb.model.nverts()).filter(|&v| tornb[v]).map(|v| areab[v] * kb * kb * 1e4).sum();
+            let tw_all = winner_of("A", "B", ta_all, tb_all, 0.5, true);
+            if let Err(e) = write_png(&stage_planted, &pick.pimg) {
+                cleanup(&stage);
+                return fail(e);
             }
-            for pose in try_poses {
-                let (limg, rimg, pimg, rmse) = render_triple(&cand.weights, pose, 2, &cand.vertices);
-                if best_pick.as_ref().is_none_or(|b| rmse > b.5) {
-                    best_pick = Some((cand, pose, limg, rimg, pimg, rmse));
-                }
-            }
-            if best_pick.as_ref().is_some_and(|b| b.5 >= 12.0) {
-                break;
-            }
-        }
-        let Some((cand, pose, limg, rimg, pimg, planted_rmse)) = best_pick else {
-            cleanup(&stage);
-            return fail("blind: no pose available to render planted bad case");
+            let c_a_opt = pick.custom_ctx.map(|(a_c, _)| a_c);
+            let planted_rmse = pick.rmse;
+            let frame_name = pick.frame.clone();
+            claim_items.insert(
+                0,
+                Pending {
+                    stem: "000_whole_body".into(),
+                    category: "claim",
+                    focus: "the whole body at the game camera".into(),
+                    frame: frame_name.clone(),
+                    pose: pick.pose,
+                    view_src: 2,
+                    marked: pick.cand.vertices.clone(),
+                    tears_cm2: [("A".to_string(), (ta_all * 10.0).round() / 10.0), ("B".to_string(), (tb_all * 10.0).round() / 10.0)]
+                        .into_iter()
+                        .collect(),
+                    tears_winner: tw_all.clone(),
+                    score_winner: score_w.clone(),
+                    expected: tw_all,
+                    limg: pick.limg,
+                    rimg: pick.rimg,
+                    pimg: pick.pimg,
+                    planted_rmse,
+                },
+            );
+            (pick.cand, frame_name, c_a_opt)
         };
-        if let Err(e) = write_png(&stage_planted, &pimg) {
-            cleanup(&stage);
-            return fail(e);
-        }
-        let frame_name = ctxa.poses.get(pose).map(|p| p.name.clone()).unwrap_or_else(|| "rest".into());
-        claim_items.insert(
-            0,
-            Pending {
-                stem: "000_whole_body".into(),
-                category: "claim",
-                focus: "the whole body at the game camera".into(),
-                frame: frame_name.clone(),
-                pose,
-                view_src: 2,
-                marked: cand.vertices.clone(),
-                tears_cm2: [("A".to_string(), (ta_all * 10.0).round() / 10.0), ("B".to_string(), (tb_all * 10.0).round() / 10.0)]
-                    .into_iter()
-                    .collect(),
-                tears_winner: tw_all.clone(),
-                score_winner: score_w.clone(),
-                expected: tw_all,
-                limg,
-                rimg,
-                pimg,
-                planted_rmse,
-            },
-        );
-        (cand, frame_name)
-    };
     for c in &claim_items {
         let _ = (c.pose, c.view_src, c.marked.len(), c.planted_rmse);
     }
@@ -438,9 +542,10 @@ pub fn cmd_blind(a: &Args) -> ExitCode {
             }
         };
 
-    let planted_ev = wf::metrics::evaluate_with(&ca.model, ctxa, &chosen_planted.weights, false);
-    let planted_score = wf::report::build("planted", &ca.model, ctxa, &planted_ev).score;
-    let planted_torn = wf::owner::torn(&ca.model, ctxa, &chosen_planted.weights, use_clips);
+    let planted_eval_ctx = custom_planted_ctx.as_ref().unwrap_or(ctxa);
+    let planted_ev = wf::metrics::evaluate_with(&ca.model, planted_eval_ctx, &chosen_planted.weights, false);
+    let planted_score = wf::report::build("planted", &ca.model, planted_eval_ctx, &planted_ev).score;
+    let planted_torn = wf::owner::torn(&ca.model, planted_eval_ctx, &chosen_planted.weights, use_clips);
     let pta: f64 = chosen_planted
         .vertices
         .iter()

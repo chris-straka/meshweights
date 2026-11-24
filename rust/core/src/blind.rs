@@ -340,7 +340,8 @@ pub fn map_vertices(src: &Model, dst: &Model, verts: &[u32]) -> Vec<u32> {
 }
 
 /// Whether `pose_mats` keeps the rig upright (`head_share >= 0.6`),
-/// evaluated over crown vertices (`rest.y >= floor + 0.85 * height`).
+/// evaluated over crown vertices (`rest.y >= floor + 0.85 * height`), plus
+/// torso verticality for humanoids so leaning/supine death poses stay excluded.
 pub fn is_upright_pose(model: &Model, pose_mats: &[crate::math::Mat4]) -> bool {
     let floor = model.rest.iter().map(|p| p.y).fold(f64::MAX, f64::min);
     let top = model.rest.iter().map(|p| p.y).fold(f64::MIN, f64::max);
@@ -352,7 +353,23 @@ pub fn is_upright_pose(model: &Model, pose_mats: &[crate::math::Mat4]) -> bool {
             n += 1;
         }
     }
-    n > 0 && (y / n as f64 - floor) / h >= 0.6
+    if n == 0 || (y / n as f64 - floor) / h < 0.6 {
+        return false;
+    }
+    if model.skel.anatomy.body == crate::anatomy::Body::Humanoid
+        && let (Some(hp), Some(hd)) = (
+            model.skel.anatomy.roles.get("hips").and_then(|v| v.first().copied()),
+            model.skel.anatomy.roles.get("head").and_then(|v| v.first().copied()),
+        )
+        && pose_mats.len() > hp.max(hd)
+    {
+        let rest_dy = model.skel.head[hd].y - model.skel.head[hp].y;
+        let posed_dy = pose_mats[hd].transform_point(model.skel.head[hd]).y - pose_mats[hp].transform_point(model.skel.head[hp]).y;
+        if rest_dy > 0.15 * h && posed_dy < 0.55 * rest_dy {
+            return false;
+        }
+    }
+    true
 }
 
 /// One candidate planted bad rig produced by mirroring left/right limb weights.
@@ -362,19 +379,34 @@ pub struct PlantedCandidate {
     pub vertices: Vec<u32>,
     pub what: String,
     pub torn: usize,
+    pub swap: BTreeMap<u32, u32>,
+    pub asymmetry: f64,
 }
 
-fn mirrored_swap_map(model: &Model, role_bases: &[&str]) -> BTreeMap<u32, u32> {
-    let roles = &model.skel.anatomy.roles;
-    let mut swap: BTreeMap<u32, u32> = BTreeMap::new();
-    for base in role_bases {
-        let (Some(l), Some(r)) = (roles.get(&format!("{base}.L")), roles.get(&format!("{base}.R"))) else { continue };
+fn pair_chain_lists(swap: &mut BTreeMap<u32, u32>, l: &[usize], r: &[usize]) {
+    if l.is_empty() || r.is_empty() {
+        return;
+    }
+    if l.len() == r.len() {
         for (a, b) in l.iter().zip(r.iter()) {
             swap.insert(*a as u32, *b as u32);
             swap.insert(*b as u32, *a as u32);
         }
+        return;
     }
-    // Pair twist/helper bones driven by swapped joints so helper-weighted skin moves too.
+    // Map asymmetric L/R bone counts symmetrically by normalized chain index so
+    // vertices on every extra sub-bone still relocate to the opposite limb.
+    for (i, &a) in l.iter().enumerate() {
+        let j = (i * (r.len() - 1) + (l.len() - 1) / 2) / (l.len() - 1).max(1);
+        swap.insert(a as u32, r[j.min(r.len() - 1)] as u32);
+    }
+    for (j, &b) in r.iter().enumerate() {
+        let i = (j * (l.len() - 1) + (r.len() - 1) / 2) / (r.len() - 1).max(1);
+        swap.insert(b as u32, l[i.min(l.len() - 1)] as u32);
+    }
+}
+
+fn attach_helper_pairs(model: &Model, swap: &mut BTreeMap<u32, u32>) {
     let helper_list = &model.skel.helpers;
     let mut by_driver: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for h in helper_list {
@@ -383,18 +415,170 @@ fn mirrored_swap_map(model: &Model, role_bases: &[&str]) -> BTreeMap<u32, u32> {
     let driver_pairs: Vec<(u32, u32)> = swap.iter().filter(|&(a, b)| a < b).map(|(&a, &b)| (a, b)).collect();
     for (la, rb) in driver_pairs {
         if let (Some(hl), Some(hr)) = (by_driver.get(&(la as usize)), by_driver.get(&(rb as usize))) {
-            for (&a, &b) in hl.iter().zip(hr.iter()) {
-                swap.insert(a as u32, b as u32);
-                swap.insert(b as u32, a as u32);
-            }
+            pair_chain_lists(swap, hl, hr);
         }
     }
+}
+
+fn mirrored_swap_map(model: &Model, role_bases: &[&str]) -> BTreeMap<u32, u32> {
+    let roles = &model.skel.anatomy.roles;
+    let mut swap: BTreeMap<u32, u32> = BTreeMap::new();
+    for base in role_bases {
+        let (Some(l), Some(r)) = (roles.get(&format!("{base}.L")), roles.get(&format!("{base}.R"))) else { continue };
+        pair_chain_lists(&mut swap, l, r);
+    }
+    attach_helper_pairs(model, &mut swap);
     swap
 }
 
+fn geometric_bilateral_swap_map(model: &Model) -> BTreeMap<u32, u32> {
+    let sk = &model.skel;
+    let n = sk.joints.len();
+    if n < 2 || model.rest.is_empty() {
+        return BTreeMap::new();
+    }
+    let up = crate::math::v3(0.0, 1.0, 0.0);
+    let fwd = if sk.anatomy.forward.len2() > 0.0 { sk.anatomy.forward } else { crate::math::v3(0.0, 0.0, 1.0) };
+    let left = up.cross(fwd).normalized();
+    let h = owner::height(model).max(1e-9);
+    let mid_lat = if n > 0 {
+        let mut xs: Vec<f64> = (0..n).map(|j| sk.head[j].dot(left)).collect();
+        xs.sort_by(|a, b| a.total_cmp(b));
+        xs[xs.len() / 2]
+    } else {
+        0.0
+    };
+    let mut mass = vec![0usize; n];
+    for vw in &model.weights {
+        if let Some(&(j, w)) = vw.first()
+            && w > 0.05
+            && (j as usize) < n
+        {
+            mass[j as usize] += 1;
+        }
+    }
+    let pos_of = |j: usize| {
+        let p = (sk.head[j] + sk.tail[j]) * 0.5;
+        (p.dot(left) - mid_lat, p.dot(fwd), p.y)
+    };
+    let mut swap = BTreeMap::new();
+    let lefts: Vec<usize> =
+        (0..n).filter(|&j| crate::helpers::helper_of(sk, j).is_none() && mass[j] > 0 && pos_of(j).0 > 0.03 * h).collect();
+    let rights: Vec<usize> =
+        (0..n).filter(|&j| crate::helpers::helper_of(sk, j).is_none() && mass[j] > 0 && pos_of(j).0 < -0.03 * h).collect();
+    for &jl in &lefts {
+        let (ll, lf, ly) = pos_of(jl);
+        if let Some(&jr) = rights.iter().min_by(|&&a, &&b| {
+            let (al, af, ay) = pos_of(a);
+            let (bl, bf, by) = pos_of(b);
+            let da = ((ll + al).powi(2) + (lf - af).powi(2) + (ly - ay).powi(2)).sqrt();
+            let db = ((ll + bl).powi(2) + (lf - bf).powi(2) + (ly - by).powi(2)).sqrt();
+            da.total_cmp(&db)
+        }) {
+            let (rl, rf, ry) = pos_of(jr);
+            let dist = ((ll + rl).powi(2) + (lf - rf).powi(2) + (ly - ry).powi(2)).sqrt();
+            if dist < 0.14 * h {
+                swap.insert(jl as u32, jr as u32);
+                swap.insert(jr as u32, jl as u32);
+            }
+        }
+    }
+    attach_helper_pairs(model, &mut swap);
+    swap
+}
+
+/// Pure left/right limb pose asymmetry relative to torso in `pose_mats`,
+/// normalized by character height. Near zero on rest and symmetric lunges,
+/// large (`~0.2-0.6`) on opposite-phase `walk`/`trot` frames and single-limb poses.
+pub fn swap_asymmetry(model: &Model, pose_mats: &[crate::math::Mat4], swap: &BTreeMap<u32, u32>) -> f64 {
+    let sk = &model.skel;
+    let n = sk.joints.len();
+    if n == 0 || pose_mats.len() < n || swap.is_empty() {
+        return 0.0;
+    }
+    let base_j = sk
+        .anatomy
+        .roles
+        .get("chest")
+        .or_else(|| sk.anatomy.roles.get("hips"))
+        .and_then(|v| v.first().copied())
+        .filter(|&j| j < n && !swap.contains_key(&(j as u32)))
+        .or_else(|| (0..n).find(|&j| sk.jparent[j].is_none() && !swap.contains_key(&(j as u32))))
+        .unwrap_or(0);
+    let up = crate::math::v3(0.0, 1.0, 0.0);
+    let fwd = if sk.anatomy.forward.len2() > 0.0 { sk.anatomy.forward } else { crate::math::v3(0.0, 0.0, 1.0) };
+    let rest_left = up.cross(fwd).normalized();
+    let base_m = pose_mats[base_j];
+    let rest_mid = sk.head[base_j];
+    let posed_mid = base_m.transform_point(rest_mid);
+    let pl_vec = base_m.transform_vector(rest_left);
+    let posed_left = if pl_vec.len2() > 1e-9 { pl_vec.normalized() } else { rest_left };
+    let h = owner::height(model).max(1e-9);
+    let mut max_asym = 0.0f64;
+    for (&la, &rb) in swap {
+        if la >= rb {
+            continue;
+        }
+        let (li, ri) = (la as usize, rb as usize);
+        if li >= n || ri >= n {
+            continue;
+        }
+        let (ptl, ptr) = (sk.tail[li], sk.tail[ri]);
+        let dl = pose_mats[li].transform_point(ptl) - posed_mid;
+        let dr = pose_mats[ri].transform_point(ptr) - posed_mid;
+        let dr_mir = dr - posed_left * (2.0 * dr.dot(posed_left));
+        let dl_r = ptl - rest_mid;
+        let dr_r = ptr - rest_mid;
+        let dr_r_mir = dr_r - rest_left * (2.0 * dr_r.dot(rest_left));
+        let base_delta = base_m.transform_vector(dl_r - dr_r_mir);
+        let asym = ((dl - dr_mir) - base_delta).len() / h;
+        max_asym = max_asym.max(asym);
+    }
+    max_asym
+}
+
+/// Generates an upright opposite-phase asymmetric test pose across the top-level
+/// joints of `swap` when the input poses/clips are all mirror-symmetric.
+pub fn asymmetric_planted_pose(model: &Model, swap: &BTreeMap<u32, u32>) -> Option<crate::poses::Pose> {
+    let sk = &model.skel;
+    let n = sk.joints.len();
+    if swap.is_empty() || n == 0 {
+        return None;
+    }
+    let up = crate::math::v3(0.0, 1.0, 0.0);
+    let fwd = if sk.anatomy.forward.len2() > 0.0 { sk.anatomy.forward } else { crate::math::v3(0.0, 0.0, 1.0) };
+    let left = up.cross(fwd).normalized();
+    let is_root_in_swap = |j: usize| {
+        let mut p = sk.jparent[j];
+        while let Some(q) = p {
+            if swap.contains_key(&(q as u32)) {
+                return false;
+            }
+            p = sk.jparent[q];
+        }
+        true
+    };
+    let mut moves = Vec::new();
+    for (&a, &b) in swap {
+        if a >= b {
+            continue;
+        }
+        let (ja, jb) = (a as usize, b as usize);
+        if ja >= n || jb >= n || !is_root_in_swap(ja) || !is_root_in_swap(jb) {
+            continue;
+        }
+        // Put side A forward/up and side B back/down for clear opposite-phase separation.
+        let (l_j, r_j) = if sk.head[ja].dot(left) >= sk.head[jb].dot(left) { (ja, jb) } else { (jb, ja) };
+        moves.push((l_j, left, 28f64.to_radians()));
+        moves.push((r_j, left, -24f64.to_radians()));
+    }
+    (!moves.is_empty()).then(|| crate::poses::Pose { name: "asymmetric_stride".into(), moves, locals: Vec::new() })
+}
+
 /// Candidate planted bad copies of a rig: whole mirrored limb chains
-/// (`arm`/`foreleg`, `leg`, `legK`) followed by single-role fallbacks,
-/// each evaluated for torn skin and paired with its best upright pose.
+/// (`arm`/`foreleg`, `leg`, `wing`, `fin`, `legK`), followed by single-role
+/// and geometric bilateral fallbacks, each evaluated for torn skin and paired
+/// with its clearest upright asymmetric pose.
 pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<PlantedCandidate> {
     let roles = &model.skel.anatomy.roles;
     let mut specs: Vec<(String, Vec<String>)> = Vec::new();
@@ -404,6 +588,12 @@ pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<Planted
         specs.push(("arm".into(), ["shoulder", "upper_arm", "forearm", "hand", "fingers"].iter().map(|s| (*s).into()).collect()));
     }
     specs.push(("leg".into(), ["thigh", "shin", "foot", "toe"].iter().map(|s| (*s).into()).collect()));
+    if roles.contains_key("wing*.L") || roles.contains_key("wing_upper.L") {
+        specs.push(("wing".into(), ["wing*", "wing_upper", "wing_mid", "wing_tip"].iter().map(|s| (*s).into()).collect()));
+    }
+    if roles.contains_key("fin*.L") || roles.contains_key("fin_upper.L") {
+        specs.push(("fin".into(), ["fin*", "fin_upper", "fin_mid"].iter().map(|s| (*s).into()).collect()));
+    }
 
     // Multi-legged creatures: pair legK_upper / legK_lower chains.
     let mut leg_k: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -421,6 +611,7 @@ pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<Planted
         parts.dedup();
         specs.push((prefix, parts));
     }
+    let num_primary_specs = specs.len();
 
     // Single-role fallbacks when a full limb chain is absent or untorn.
     const FIXED: &[&str] = &["upper_arm", "forearm", "thigh", "shin", "hand", "foot"];
@@ -430,6 +621,8 @@ pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<Planted
     for key in roles.keys() {
         if let Some(base) = key.strip_suffix(".L")
             && !FIXED.contains(&base)
+            && !base.starts_with("wing")
+            && !base.starts_with("fin")
             && roles.contains_key(&format!("{base}.R"))
         {
             specs.push((base.to_string(), vec![base.to_string()]));
@@ -442,11 +635,9 @@ pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<Planted
     let mut primary = Vec::new();
     let mut fallback = Vec::new();
 
-    for (idx, (label, part_names)) in specs.iter().enumerate() {
-        let refs: Vec<&str> = part_names.iter().map(String::as_str).collect();
-        let swap = mirrored_swap_map(model, &refs);
+    let evaluate_swap = |label: &str, swap: BTreeMap<u32, u32>| -> Option<PlantedCandidate> {
         if swap.is_empty() {
-            continue;
+            return None;
         }
         let w: Weights = model
             .weights
@@ -464,16 +655,13 @@ pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<Planted
         }
         let torn = torn_mask.iter().filter(|&&x| x).count();
         if torn == 0 {
-            continue;
+            return None;
         }
-        let Some(f) = sec
+        let f = sec
             .findings
             .iter()
             .filter(|f| f.severity == "fail" && f.kind != "limb_through")
-            .max_by(|a, b| a.area_cm2.total_cmp(&b.area_cm2))
-        else {
-            continue;
-        };
+            .max_by(|a, b| a.area_cm2.total_cmp(&b.area_cm2))?;
         let verts: Vec<u32> = (0..model.nverts() as u32).filter(|&v| torn_mask[v as usize]).collect();
         let disp = |p: usize| -> f64 {
             let mats = &ctx.mats[p];
@@ -487,34 +675,56 @@ pub fn planted_candidates(model: &Model, ctx: &Ctx, motion: bool) -> Vec<Planted
                 })
                 .sum()
         };
+        let asyms: Vec<f64> = ctx.mats.iter().map(|m| swap_asymmetry(model, m, &swap)).collect();
         let best_pose = (0..ctx.mats.len())
             .filter(|&p| !any_upright || upright[p])
-            .map(|p| (p, disp(p)))
+            .map(|p| (p, disp(p) * (0.20 + asyms[p])))
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map_or(f.worst_pose, |(p, _)| p);
-        let cand = PlantedCandidate {
+        Some(PlantedCandidate {
             weights: w,
             pose: best_pose,
             vertices: verts,
             what: format!("the left and right {label} weights were swapped"),
             torn,
-        };
-        let is_group = part_names.len() > 1 || idx < 2;
-        if is_group {
-            primary.push(cand);
-        } else {
-            fallback.push(cand);
-        }
-        if primary.len() >= 2 && primary.iter().all(|c| c.torn >= 25) {
-            break;
+            asymmetry: asyms.get(best_pose).copied().unwrap_or(0.0),
+            swap,
+        })
+    };
+
+    for (idx, (label, part_names)) in specs.iter().enumerate() {
+        let refs: Vec<&str> = part_names.iter().map(String::as_str).collect();
+        let swap = mirrored_swap_map(model, &refs);
+        if let Some(cand) = evaluate_swap(label, swap) {
+            if idx < num_primary_specs {
+                primary.push(cand);
+            } else {
+                fallback.push(cand);
+            }
         }
     }
+    if primary.iter().all(|c| c.torn < 25)
+        && fallback.iter().all(|c| c.torn < 25)
+        && let Some(cand) = evaluate_swap("bilateral limbs", geometric_bilateral_swap_map(model))
+    {
+        fallback.push(cand);
+    }
+
     if primary.iter().any(|c| c.torn >= 25) {
         primary.retain(|c| c.torn >= 25);
+        primary.sort_by(|a, b| {
+            let sa = (a.torn as f64).sqrt() * (0.20 + a.asymmetry);
+            let sb = (b.torn as f64).sqrt() * (0.20 + b.asymmetry);
+            sb.total_cmp(&sa)
+        });
         primary
     } else {
         primary.extend(fallback);
-        primary.sort_by_key(|a| std::cmp::Reverse(a.torn));
+        primary.sort_by(|a, b| {
+            let sa = (a.torn as f64).sqrt() * (0.20 + a.asymmetry);
+            let sb = (b.torn as f64).sqrt() * (0.20 + b.asymmetry);
+            sb.total_cmp(&sa).then(b.torn.cmp(&a.torn))
+        });
         primary
     }
 }

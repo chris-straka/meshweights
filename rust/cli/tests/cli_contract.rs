@@ -818,3 +818,109 @@ json.dump({{"version": 1, "seed": seed, "question": q, "pairs": key}}, open(out_
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn symmetric_only_blind_synthesizes_asymmetric_stride_and_gait_flag_runs() {
+    let d = tmp("sym_blind_and_gait");
+    let ds = d.to_str().unwrap();
+    assert_eq!(run(&["fixture", "all", "--out", ds]).0, 0);
+    let clean = d.join("mannequin_clean.glb");
+    let bleed = d.join("mannequin_bleed.glb");
+    let metrics = d.join("metrics.ron");
+    std::fs::write(&metrics, r#"{"camera": {"distance": 3.0, "fov": 75.0}}"#).unwrap();
+
+    // Purely symmetric ROM poses (arms move identically forward -> mirror-symmetric planted difference ~0 without synthesis).
+    let sym_poses = d.join("sym.ron");
+    std::fs::write(
+        &sym_poses,
+        r#"PoseSet(name: "sym_only", poses: [
+            PoseSpec(name: "both_arms_fwd", moves: [
+                Move(bone: "upper_arm.L", motion: Bend(Forward, 45)),
+                Move(bone: "upper_arm.R", motion: Bend(Forward, 45)),
+            ]),
+        ])"#,
+    )
+    .unwrap();
+
+    // Verify --gait flag is accepted cleanly by check.
+    let (c_gait, out_gait, err_gait) = run(&["check", clean.to_str().unwrap(), "--gait", "--json"]);
+    assert_eq!(c_gait, 0, "check --gait failed: {err_gait}");
+    let vj: serde_json::Value = serde_json::from_str(&out_gait).unwrap();
+    assert_eq!(vj["class"], "humanoid");
+
+    // Reuse minimal fake gk tool to inspect blind planted frame synthesized from symmetric-only poses.
+    let fake_gk = d.join("gk");
+    let rmse_log = d.join("rmse.txt");
+    std::fs::write(
+        &fake_gk,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, math, os, shutil, struct, sys, zlib
+def read_png(p):
+    d = open(p, 'rb').read(); i = 8; w = h = 0; idat = bytearray()
+    while i < len(d):
+        ln, tp = struct.unpack('>I4s', d[i:i+8])
+        c = d[i+8:i+8+ln]; i += 12 + ln
+        if tp == b'IHDR': w, h = struct.unpack('>II', c[:8])
+        elif tp == b'IDAT': idat.extend(c)
+        elif tp == b'IEND': break
+    raw = zlib.decompress(bytes(idat)); st = w * 3; out = bytearray(); prev = bytearray(st)
+    for y in range(h):
+        f = raw[y*(st+1)]; row = bytearray(raw[y*(st+1)+1:(y+1)*(st+1)])
+        if f == 1:
+            for k in range(3, st): row[k] = (row[k] + row[k-3]) & 0xFF
+        elif f == 2:
+            for k in range(st): row[k] = (row[k] + prev[k]) & 0xFF
+        elif f == 3:
+            for k in range(st): row[k] = (row[k] + ((row[k-3] if k>=3 else 0)+prev[k])//2) & 0xFF
+        elif f == 4:
+            for k in range(st):
+                a = row[k-3] if k>=3 else 0; b = prev[k]; c = prev[k-3] if k>=3 else 0
+                p2 = a + b - c; pa, pb, pc = abs(p2-a), abs(p2-b), abs(p2-c)
+                row[k] = (row[k] + (a if pa<=pb and pa<=pc else (b if pb<=pc else c))) & 0xFF
+        out.extend(row); prev = row
+    return out
+a_dir = sys.argv[sys.argv.index('--a')+1]; b_dir = sys.argv[sys.argv.index('--b')+1]
+out_dir = sys.argv[sys.argv.index('--out')+1]; pl = sys.argv[sys.argv.index('--planted')+1]
+imgs = sorted(f for f in os.listdir(a_dir) if f.endswith('.png'))
+pa = read_png(os.path.join(a_dir, imgs[0])); pp = read_png(pl)
+pr = math.sqrt(sum((x-y)*(x-y) for x, y in zip(pa, pp)) / len(pa))
+open({:?}, 'w').write(f'{{pr:.4f}}\n')
+assert pr > 5.0, pr
+os.makedirs(out_dir, exist_ok=True)
+pairs = [{{'id':'pair-01','kind':'control','claim':os.path.splitext(imgs[0])[0],'left':'a','rmse':0.0}},
+         {{'id':'pair-02','kind':'planted','claim':os.path.splitext(imgs[0])[0],'left':'a','rmse':pr}}]
+json.dump({{'version':1,'pairs':[]}}, open(os.path.join(out_dir, 'judge.json'), 'w'))
+json.dump({{'version':1,'pairs':pairs}}, open(out_dir + '.key.json', 'w'))
+"#,
+            rmse_log.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("+x").arg(&fake_gk).status().unwrap();
+
+    let out = d.join("sym_blind");
+    let o = Command::new(bin())
+        .args([
+            "blind",
+            bleed.to_str().unwrap(),
+            clean.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--poses",
+            sym_poses.to_str().unwrap(),
+            "--no-clips",
+            "--camera",
+            "follow",
+            "--metrics",
+            metrics.to_str().unwrap(),
+        ])
+        .env("GK_BIN", &fake_gk)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let key: serde_json::Value = serde_json::from_slice(&std::fs::read(d.join("sym_blind.key.json")).unwrap()).unwrap();
+    let planted_pair = key["pairs"].as_array().unwrap().iter().find(|p| p["category"] == "planted").unwrap();
+    assert_eq!(planted_pair["frame"], "asymmetric_stride", "{planted_pair}");
+    let _ = std::fs::remove_dir_all(&d);
+}
