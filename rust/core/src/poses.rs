@@ -276,12 +276,12 @@ pub fn name_roles(sk: &Skeleton) -> BTreeMap<String, Vec<usize>> {
         let (side, body) = side_of(&strip_prefixes(&sk.names[j]));
         side == Side::C && matches!(part_of(&body), Some("neck" | "head"))
     });
-    for j in 0..sk.joints.len() {
+    for (j, name) in sk.names.iter().enumerate().take(sk.joints.len()) {
         // Helpers follow their driver; a pose never moves them directly.
         if !posable(j) {
             continue;
         }
-        let (side, body) = side_of(&strip_prefixes(&sk.names[j]));
+        let (side, body) = side_of(&strip_prefixes(name));
         let part = match rigify_spine(&body) {
             Some(p) if !named_neck_head && side == Side::C => (!p.is_empty()).then_some(p),
             _ => part_of(&body),

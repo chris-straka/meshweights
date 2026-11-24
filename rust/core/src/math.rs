@@ -202,10 +202,8 @@ impl Mat4 {
     }
     pub fn to_cols_vec(&self) -> Vec<f64> {
         let mut v = Vec::with_capacity(16);
-        for c in 0..4 {
-            for r in 0..4 {
-                v.push(self.m[c][r]);
-            }
+        for col in &self.m {
+            v.extend_from_slice(col);
         }
         v
     }
