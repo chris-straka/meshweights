@@ -4,29 +4,31 @@ One rules file only: this `AGENTS.md` is it — never create a `CLAUDE.md` in th
 
 Skin-weight QA and repair for rigged game GLBs. Rust core
 (`rust/core`, MIT) + `weights` CLI (`rust/cli`) + Blender extension
-(`blender/weightforge`, GPL, subprocess only). Spec and gates: PLAN.md;
-measured gate numbers: `docs/phase-N.md`.
+(`blender/weightforge`, GPL, subprocess only). Docs index:
+[`docs/README.md`](docs/README.md). Spec and roadmap: [`PLAN.md`](PLAN.md);
+archived gate numbers: [`docs/archive/phase-0.md`](docs/archive/phase-0.md) ..
+[`docs/archive/phase-5.md`](docs/archive/phase-5.md).
 
 ## Standing rules
 
-- Commit and push after each completed chunk; never force-push or
-  rewrite history. The remote is `chris-straka/meshweights`.
-- Never commit the owner's game assets, nor their names or paths in
-  tracked files ("the owner's corpus"). `bench/models/` and
-  `bench/results/` are gitignored.
+- Commit after each completed chunk on your working branch; never force-push or
+  rewrite history. The public remote is `chris-straka/meshweights`.
+- **Public repo privacy:** never commit game assets, private game/character/creature
+  codenames, home-directory or user-specific filesystem paths, or denylisted terms.
+  `bench/models/` and `bench/results/` are gitignored.
 - Never move vertices or rename/reparent bones: meshweights only writes
   JOINTS_0/WEIGHTS_0.
 - No GPL code in `rust/`. Check a crate's licence before adding it.
 - GLB container/accessor IO and the rig-contract constants (piece words,
-  4 influences) come from `glbkit` in the rfcheck repo, pinned by `rev`,
+  4 influences) come from `glbkit` (via `rfcheck`, pinned by `rev`),
   so the checker and the fixer cannot drift. Change shared rules there.
-- Headless Blender only (`--background --factory-startup`), and use the
-  app binary, not the `~/.local/bin/blender` shim.
+- Headless Blender only (`--background --factory-startup`), and invoke the
+  full Blender application binary directly rather than a wrapper shim.
 
 ## Checks
 
-- `cd rust && cargo fmt --all --check && cargo build --release && cargo test --release`
-  must be green with zero rustc warnings.
+- `cd rust && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --locked --release`
+  must be green with zero warnings.
 - Golden images (`tests/fixtures/golden/`): after an intended render
   change, regenerate with `UPDATE_GOLDENS=1 cargo test --release` and
   look at the PNGs before committing.
@@ -37,5 +39,5 @@ measured gate numbers: `docs/phase-N.md`.
 - Bad input (`rust/cli/tests/robust_input.rs`): a NaN position or bind matrix is exit 2
   with a message, never a hang or a panic; a result file that can't be written is an error.
 - Threshold changes: rerun the P0 gate (`core/tests/p0_gate.rs`) and update
-  the numbers in `docs/phase-0.md`.
+  the numbers in `docs/archive/phase-0.md`.
 - New CLI flags go in `--help` and the README.

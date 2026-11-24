@@ -1,7 +1,7 @@
 # Region pick and metric bands (2026-10-05)
 
-Two fixes to `weights fix`, prompted by the SkinTokens Rust port and the
-groin-topology work (genforge D62):
+Two fixes to `weights fix`, prompted by the SkinTokens Rust port and
+groin-topology work:
 
 1. A better candidate could give a worse fix.
 2. Repair bands were counted in edge rings, so they narrowed on denser
@@ -71,13 +71,12 @@ Noise made a skin worse, it lost the early sets, and the fix went up
 
 ### Evidence
 
-The case from the SkinTokens port (`skintokens/docs/evaluation.md`,
-"Rust port"). The input is the standardized 17.0-score game rig of the
-the hero rehearsal mesh, and one `skintokens skin` output is the
-`--candidate`. Candidates are 8 Python and 8 Rust seeds; Rust seed 4 is
-also degraded with multiplicative weight noise (amplitude 0.25 to 2.0,
-plus the noisy copy the evaluation used). Candidate quality is the skin's
-own `check` score.
+From the SkinTokens Rust-port evaluation: the input is a standardized
+17.0-score rig of the test humanoid mesh, and one `skintokens skin`
+output is the `--candidate`. Candidates are 8 Python and 8 Rust seeds;
+Rust seed 4 is also degraded with multiplicative weight noise
+(amplitude 0.25 to 2.0, plus the noisy copy used in evaluation).
+Candidate quality is the skin's own `check` score.
 
 | | old (greedy) | new |
 |---|---|---|
@@ -89,8 +88,6 @@ own `check` score.
 | + noise 1.0 (11.1) / 2.0 (0.7) | 36.6 / 36.6 | 46.4 / 46.4 |
 | evaluation's noisy copy (38.3) | 49.5 | 47.3 |
 | no candidate | – | 46.4 |
-
-Sheet: `~/Downloads/weightforge-fix/3-candidate-quality-vs-fix.png`.
 
 What this shows:
 
@@ -174,80 +171,74 @@ repaired to no failing finding the clean twin lacks, at every density.
 Its score still falls with density, because `fix` only changes flagged
 areas, and the narrow blends it leaves alone cost energy without failing.
 
-**Real characters**, three densities each through the genforge chain:
-repair-topology (with `--skeleton`), a fresh SkinTokens `rig` (seeds 0,
-1, 2), motionforge standardize, then `weights fix` with defaults as the
-chain runs it. Score after fix, mean of 3 seeds (seed range), runs that
-pass the gate:
+**Real characters**, three densities each through an automated character
+chain (topology repair with `--skeleton`, a fresh SkinTokens `rig` across
+seeds 0, 1, 2, skeleton standardization, then `weights fix` with
+defaults): score after fix, mean of 3 seeds (seed range), runs that pass
+the gate:
 
 | | low | mid | high |
 |---|---|---|---|
-| hero, verts | 2,503 | 4,459 | 6,971 |
+| humanoid_a, verts | 2,503 | 4,459 | 6,971 |
 | old | 73.3 (66.5-77.7), 2/3 | 75.4 (75.2-75.7), 0/3 | 77.8 (77.2-78.6), 0/3 |
 | new | 77.2 (73.2-79.3), 3/3 | 76.2 (76.0-76.4), 2/3 | 76.3 (73.2-78.2), 0/3 |
 | mannequin, verts | 2,662 | 4,455 | 6,683 |
 | old | 78.4 (77.1-81.0), 0/3 | 83.0 (79.4-86.6), 0/3 | 82.7 (78.4-86.3), 0/3 |
 | new | 86.1 (84.9-87.2), 2/3 | 83.2 (79.4-87.0), 1/3 | 86.2 (82.5-90.5), 0/3 |
-| giraffe, verts | 3,721 | 5,879 | 8,430 |
+| quadruped_a, verts | 3,721 | 5,879 | 8,430 |
 | old | 41.4 (40.6-41.9) | 35.6 (29.2-42.3) | 55.4 (41.4-81.2) |
 | new | 43.0 (42.9-43.1) | 38.1 (34.6-43.2) | 56.0 (42.2-81.6) |
 
 What this shows:
 
-- **Hero:** the spread of the means across densities went from 4.5
+- **humanoid_a:** the spread of the means across densities went from 4.5
   points to 1.0, well inside seed noise (up to 6 points within one
   density). Runs passing the gate: 2/9 → 5/9. High density still keeps
   one left upper arm stretch (7 verts, arm_up) in every seed.
 - **Mannequin:** spread 4.6 → 3.0 (seed noise up to 8); passing 0/9 → 3/9.
-- **Giraffe:** SkinTokens builds a different quadruped skeleton every run
+- **quadruped_a:** SkinTokens builds a different quadruped skeleton every run
   (raw 5.4-41.4, 21-27 bones), so its spread is the rig, not the weights.
-  The fix is level or better at every density.
-
-Sheets: `~/Downloads/weightforge-fix/2-density-scores-old-vs-new.png`, and
-`4-hero-low-density-old-vs-new.png` (seed 0, 2.5k verts: old 66.5 fails
-ARM_UP.L, new 73.2 passes).
+  The fix is level or better at every density (e.g. seed 0, 2.5k verts on
+  humanoid_a: old 66.5 fails ARM_UP.L, new 73.2 passes).
 
 **Bench (P4 set, 7 UniRig rigs with generic bone names, harsh generic
-ROM; old → new):** hero 50.9 → 51.1, bird 42.5 → 35.4, cree 64.6 →
-65.0, giraffe 32.5 → 30.9, stalker 77.6 → 66.5 (failing 3 → 1), tira 39.8
-→ 60.3, carrot 27.3 → 40.0. None worse than its input, none passes.
-Three improved and three dropped. These rigs have 14 to 88 failing
-findings, so the pick is not exact. On stalker, gate-first traded 11
-points for two fewer failing findings. These rigs are re-rig cases
-(rigforge, wrapforge), not weight cases.
+ROM; old → new):** A 50.9 → 51.1, B 42.5 → 35.4, C 64.6 → 65.0, D 32.5
+→ 30.9, E 77.6 → 66.5 (failing 3 → 1), F 39.8 → 60.3, G 27.3 → 40.0.
+None worse than its input, none passes. Three improved and three
+dropped. These rigs have 14 to 88 failing findings, so the pick is not
+exact. On asset E, gate-first traded 11 points for two fewer failing
+findings. These rigs are re-rig cases, not weight cases.
 
-## The hero through the genforge chain
+## End-to-end character chain check
 
-genforge `--mode rehearsal` (free mock providers, the real local
-adapters), the hero fixture model, SkinTokens rig, same as D62; only the
-weightforge binary changed.
+Rehearsal pipeline run on the humanoid fixture model with a SkinTokens
+rig; only the meshweights binary changed:
 
 | step | before | after |
 |---|---|---|
-| D62 (old weightforge) | 62.7, 4 failing | 75.7, 1 failing: left upper arm stretch, arm_up, 4 verts → stops at the gate |
-| now | 62.7, 4 failing | **76.0, passes** |
+| previous build | 62.7, 4 failing | 75.7, 1 failing: left upper arm stretch, arm_up, 4 verts → stops at the gate |
+| current build | 62.7, 4 failing | **76.0, passes** |
 
-Sheet: `~/Downloads/weightforge-fix/1-hero-gate-before-vs-after.png`
-(every ROM pose clean, ARM_UP.L 8 → 0).
+Every ROM pose passes clean (ARM_UP.L 8 → 0).
 
 The chain then goes past the gate for the first time: pose-test (gate),
-animate (the game's 9 clips), recheck. The recheck adds 54 clip samples
-to the 31 ROM poses and fails at 45.7. The worst frame is the both-arms
-overhead swing of `attack_3` at 0.17 s, with 52 bad verts across both
-upper arms. Fix 45.7 → 50.1 still leaves upper-arm stretch and volume on
-both sides, and the chain stops at its repair limit. Sheet:
-`5-after-animate-attack3-fails.png`. The rehearsal mannequin fails the
-same swing (genforge phase-7, run B). A shoulder raised past the head
-collapses under linear blend skinning whatever the weights. Next lever:
-corrective blend shapes for arm_up/arm_forward baked into the clips
-(Bevy plays morph weights), or a limit on that swing in the clip.
+animate (9 game clips), recheck. The recheck adds 54 clip samples to the
+31 ROM poses and fails at 45.7. The worst frame is the both-arms overhead
+swing of `attack_3` at 0.17 s, with 52 bad verts across both upper arms.
+Fix 45.7 → 50.1 still leaves upper-arm stretch and volume on both sides,
+and the chain stops at its repair limit. The mannequin fails the same
+overhead swing. A shoulder raised past the head collapses under linear
+blend skinning whatever the weights. Next lever: corrective blend shapes
+for arm_up/arm_forward baked into the clips, or a limit on that swing in
+the clip.
 
 ## Cost
 
-`weights fix` time on the M4, old → new: the hero and the mannequin
-0.3 → 1-2 s; the 17.0 game rig 0.9 → about 30 s (16 failing regions:
-each pick runs to its node budget, and refinement re-measures about 600
-moves per round); bench tira (54k verts) 16 → 106 s and carrot (145k)
-6 → 106 s. Moves are measured on the mesh one region set at a time,
-against the old greedy's first-acceptable trial. With `--skintokens` or
-`--candidate` the fix runs twice (with and without externals).
+`weights fix` time on an Apple M4, old → new: `humanoid_a` and the
+mannequin 0.3 → 1-2 s; the 17.0-score rig 0.9 → about 30 s (16 failing
+regions: each pick runs to its node budget, and refinement re-measures
+about 600 moves per round); asset F (54k verts) 16 → 106 s and asset G
+(145k verts) 6 → 106 s. Moves are measured on the mesh one region set at
+a time, against the old greedy's first-acceptable trial. With
+`--skintokens` or `--candidate` the fix runs twice (with and without
+externals).

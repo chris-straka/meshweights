@@ -35,7 +35,7 @@ file size (in-place write).
 ## Picking
 
 Replaced on 2026-10-05 by an exact pick over measured moves, with band
-widths in limb radii instead of edge rings: [pick-and-bands.md](pick-and-bands.md).
+widths in limb radii instead of edge rings: [../pick-and-bands.md](../pick-and-bands.md).
 The gate above was re-run with it (`cargo test --release`): weight error
 drops 85% (noise), 100% (bleed), 99% (no_elbow_falloff), 91%
 (cape_wrong_bone), 98% (elbow_collapse) and 87% (knee_wide_falloff); every

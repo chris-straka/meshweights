@@ -1,8 +1,8 @@
 # The rig checker's headline (2026-11-13)
 
 What `weights check` now leads with, why, what was fixed in the checker
-on the way, and the numbers the lines were set from. The owner-facing
-write-up with pictures is outside this repo (the game's `tmp/rig-score/`).
+on the way, and the numbers the lines were set from. Supplementary
+visual reports live outside this repository.
 
 ## Why
 
@@ -50,27 +50,26 @@ Per pose group (the game's clips, then the range-of-motion poses):
     findings list, not the headline.
 
 The score, `pass` and the old findings list are unchanged in the JSON
-(genforge reads them; `fix` gates on them).
+(external pipeline callers read them; `fix` gates on them).
 
 Since 2026-11-15 a claim can be judged blind at the game camera
-(`weights blind`, `weights blind-score`; `docs/blind.md`): where a
+(`weights blind`, `weights blind-score`; [`blind.md`](blind.md)): where a
 judge and tears agree against the score, that claim's score verdict
 is retired, and the `compare --zoom` headline ranks by pass then
 tears on the same rule. Tears is the kept measure throughout.
 
 ## The clips
 
-`--motion hero.glb` plays the source's clips (default walk, run,
-attack_1, dodge, hit, death) on the checked rig, put on by bone role:
+`--motion character.glb` plays the source's clips (default `walk,run,
+attack_1,dodge,hit,death`) on the checked rig, put on by bone role:
 per frame, each source bone's world rotation change from rest is applied
 to the target bone of the same role after aligning their rest
-directions, with a yaw when the rigs face different ways (motionforge
-`animate`'s transfer). Measured against motionforge's own output for the
-same rig without its contact pass: within 1.8 cm at every joint. The
-contact pass (which eases hands out of the body) moves wrists up to
-12 cm more, so a rig the game uses is best checked as motionforge
-animated it (its own clips): that is what the game plays. The role
-transfer serves rigs motionforge cannot map (CesiumMan, Victoria, the
+directions, with a yaw when the rigs face different ways. Measured
+against external retargeting output for the same rig without contact
+easing: within 1.8 cm at every joint. Contact passes (which ease hands
+out of the body) move wrists up to 12 cm more, so an already-animated
+rig is best checked on its own embedded clips; role transfer handles rigs
+with different skeletons or naming conventions (CesiumMan, Victoria, the
 fox). Clips are sampled at 15 frames a second.
 
 ## What was wrong in the checker, and the fix
@@ -171,6 +170,14 @@ before opening answer keys:
    - Overall `creature_calib.py --score` gate: **FAIL** (poses separation failed, `creature_02` planted eye miss, `total_claims == 0`).
    - **Actionable checker finding:** Real-clip tears cleanly separate hand-made non-Quaternius animals (`0.47%` median; `kaiju`, `m2m_dragon`, `m2m_snake`, `m2m_spider`, `octopus_dense`, `whale` all `0.00%`) from generated creatures (`2.59%`), whereas generic 45° poses bend every joint of 55–107 bone artist rigs (`bee_dense` `30.08%`, `shark_dense` `12.44%`, `eagle` `7.39%`, `panda` `7.00%`) blindly and invert the median. Calibrating creature tears reliably requires creature-specific clips/ROM poses and raw (pre-`weights fix`) generated creature inputs.
 
+#### Calibration roadmap (non-human & quadruped rigs)
+
+Closing the `creature_calib.py` gate for non-humanoids requires three steps:
+
+1. **Creature-specific ROM poses and gait clips:** Generate anatomy-keyed ROM pose sets (`quadruped`, `winged`, `multi_limb`) and neutral locomotion clips (`walk`, `trot`, `lunge`, `attack`) instead of applying generic ±45° per-bone rotations across 55–107 bone artist rigs.
+2. **Raw pre-`fix` generated creature benchmark set:** Score raw un-fixed auto-rigged creature outputs so `weights fix` addresses real surface tears that remain distinguishable (`>= 80%` judge/tears agreement) at game-camera framing rather than second-pass sub-pixel edits (`total_claims == 0`).
+3. **Opposite-phase gait frames for blind planted swaps:** Select asymmetric stride/gait frames for planted left/right limb-swap checks so symmetric attack lunges under manes or tails do not mask swapped limbs.
+
 ## Known limits
 
 - The Blender Studio rigs on the shelf are film rigs: their deform bones
@@ -179,8 +186,8 @@ before opening answer keys:
   nor a game-skeleton rebuild in Blender poses like the rig does in
   Blender; five of ten read as humanoids after the rebuild. Their numbers
   measure those files as a game would play them, not the rigs.
-- Four-legged and other bodies get no clips (the hero's are for
-  humanoids); their headline is on the poses.
+- Four-legged and other bodies get no clips by default (the reference
+  clips target humanoids); their default headline is on the poses.
 - Quaternius animals weight their hooves to IK foot bones under the root:
   bending a leg leaves the hoof behind. That is reported (wrong bone);
   their own clips would key those bones.

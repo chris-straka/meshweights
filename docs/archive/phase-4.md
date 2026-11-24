@@ -1,15 +1,15 @@
-# P4 — real assets
+# P4 — real assets (archive)
 
-Gate: 10+ Tripo-rigged characters (humanoid + creature) from genforge,
-UniRig candidate; the owner rates before/after sheets; ≥8/10 better or
-equal. **Not met: blocked on assets and on the owner.**
+Gate: 10+ Tripo-rigged characters (humanoid + creature),
+UniRig candidate; before/after sheets judged visually; ≥8/10 better or
+equal.
 
 What exists:
 
 - `bench/run.py [dir]` fixes every GLB in `bench/models/` (gitignored),
   writes A/B sheets, reports, `summary.json`, and a review index; exits 1
   if any asset got worse. `--candidates dir` adds same-stem UniRig outputs.
-- Dry run on the 7 local UniRig rigs (assets A–G, owner's corpus):
+- Dry run on the 7 local UniRig rigs (assets A–G):
 
 | asset | verdict | score | failing findings | time |
 |---|---|---|---|---|
@@ -21,25 +21,24 @@ What exists:
 | F | IMPROVED | 6.8 → 39.8 | 88 → 17 | 33.8 s |
 | G | IMPROVED | 11.9 → 27.3 | 9 → 5 | 7.1 s |
 
-0 worse. Re-run 2026-10-05 with the exact pick and metric bands: hero
-51.1, bird 35.4, cree 65.0, giraffe 30.9, stalker 66.5 (failing 3 -> 1),
-tira 60.3, carrot 40.0; still 0 worse, none passes
-([pick-and-bands.md](pick-and-bands.md)). None reach PASS: these skeletons have generic `bone_N` names, so
+0 worse. Re-run 2026-10-05 with the exact pick and metric bands: A
+51.1, B 35.4, C 65.0, D 30.9, E 66.5 (failing 3 -> 1),
+F 60.3, G 40.0; still 0 worse, none passes
+([../pick-and-bands.md](../pick-and-bands.md)). None reach PASS: these skeletons have generic `bone_N` names, so
 they get the harsh generic ROM (every bone ±45° on two axes plus twist),
 and UniRig weights are broadly wrong; the right fix for several is a
-re-rig (rigforge/wrapforge), which weightforge does not do by design.
+re-rig by upstream tools, which meshweights does not do by design.
 F (54k verts, 44 bones, 252 poses) took 34 s; 12 s since incremental trial scoring.
 
-To finish P4: generate 10+ Tripo-rigged characters with genforge, drop
-them in `bench/models/` (UniRig outputs in a candidates folder), run
-`bench/run.py --candidates <dir>`, and show the A/B sheets in the chat.
+To run on a custom set: drop GLBs in `bench/models/` (candidates in a
+candidates folder) and run `bench/run.py --candidates <dir>`.
 
 ## 2026-11-16 — 10 generated cast rigs (`SkinTokens` + `weights fix --motion`)
 
-Measured on `f` over 10 generated cast characters (`cast_01`..`cast_10`,
-standardized humanoid rigs) on the 6 game clips (`--motion`) and the
+Measured over 10 generated cast characters (`cast_01`..`cast_10`,
+standardized humanoid rigs) on 6 clips (`--motion`) and the
 range-of-motion poses, plus blind same-frame game-camera judging via
-`bench/blind_bench.py` ([`docs/blind.md`](blind.md)):
+`bench/blind_bench.py` ([`../blind.md`](../blind.md)):
 
 | rig | raw tears % (clips / poses) | raw score | uncut `fix` tears % | uncut score | cut `fix` tears % | cut score |
 |---|---|---|---|---|---|---|

@@ -1,9 +1,10 @@
-# Integrating weightforge
+# Integrating meshweights (`weights`)
 
-Where it sits in the game character chain: after rigging (Tripo auto-rig,
-SkinTokens, rigforge, wrapforge) and rfcheck, before animation and the game (Bevy)
-export. It only ever rewrites `JOINTS_0`/`WEIGHTS_0`; topology, shape, bone
-names and hierarchy belong to retopoforge, wrapforge, rigforge.
+Where it sits in a character or creature asset pipeline: after auto-rigging
+(e.g. Tripo, SkinTokens, UniRig, or custom rigs) and structural rig validation
+(such as `rfcheck`), and before animation retargeting and game-engine export.
+It only ever rewrites `JOINTS_0`/`WEIGHTS_0`; mesh topology, bone names, and
+skeleton hierarchy belong to upstream rigging and topology tools.
 
 ## The loop a pipeline runs
 
@@ -16,8 +17,8 @@ weights check rig.fixed.glb --json > recheck.json  # exit 0 means fixed
 ```
 
 If `fix` exits 1 the output is still never worse than the input (it may
-be byte-identical to it); route the asset to a re-rig (wrapforge for
-humanoids, rigforge for monsters) and show the owner `rig.ab.png`.
+be byte-identical to it); route the asset to upstream re-rigging and show
+a reviewer `rig.ab.png`.
 
 ## Exit codes
 
@@ -52,7 +53,7 @@ Region names are bone names, or `piece:<mesh name>` for detachable pieces
 (mesh names containing cape, cloak, hair, ponytail, braid). Codes:
 `D_STRETCH`, `D_VOLUME`, `D_BLEED`, `D_NOISE`, `D_PIECE_FOLLOW`,
 `D_PIECE_BONES`, `D_UNWEIGHTED` (fail); `D_INTERSECT`, `D_SEAM` (warn).
-Meanings and thresholds: [phase-0.md](phase-0.md).
+Meanings and thresholds: [archive/phase-0.md](archive/phase-0.md).
 
 ## `fix` report (`<out stem>.report.json`)
 

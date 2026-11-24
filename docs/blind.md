@@ -3,7 +3,7 @@
 How a rig claim is judged now, why the old 0-100 score loses where it
 disagrees, and the fixture numbers. The headline measure is unchanged:
 **tears** — the share of the surface inside failing findings
-(`docs/rig-score.md`). What is new is the proof beside each claim.
+([`rig-score.md`](rig-score.md)). What is new is the proof beside each claim.
 
 ## The pair per claim
 
@@ -15,8 +15,8 @@ them, else on the range-of-motion poses):
 - both rigs at **the same frame**, from **the same camera**, in the
   character's own paint, nothing marked, no rig named, no score shown;
 - the camera is **the game camera**: the follow camera, its lens and
-  distance read from `--metrics <metrics.ron>` (or `$METRICS_FILE` /
-  `$HLH_METRICS`; 3.0 m and a 75° view on 2026-11-19), so a 1.75 m body fills about
+  distance read from `--metrics <metrics.ron>` (or `$METRICS_FILE`;
+  3.0 m and a 75° view on 2026-11-19), so a 1.75 m body fills about
   38% of the frame height (45° was assumed until 2026-11-19, 70%). The heading is the follow-camera heading
   that shows the claim best (the game camera orbits as the player
   turns); the framing never closes in on the fault. A fault too small
@@ -60,9 +60,9 @@ sheets and inside `weights fix`: pass (and no new failing findings or
 blown region-energy caps) first, then tears; the score backs tears up
 when tears tie, and where the score points the other way on a judged
 sheet the headline says so ("…TEARS LESS… SCORE RETIRED"). The score
-stays in `check`'s JSON and output as the older measure (genforge and
-`fix`'s gate read it) — retiring is per verdict, where a blind pair
-has actually been judged.
+stays in `check`'s JSON and output as the older measure (external
+pipelines and `fix`'s gate read it) — retiring is per verdict, where a
+blind pair has actually been judged.
 
 ## Fixture benchmark (2026-11-15)
 
@@ -235,6 +235,6 @@ voxel graph `330e405`, fleet `2c2mp3sz`) and post-`meshweights-7`
   still; `weights probe`'s unmarked loops remain the motion check.
 - Fused robes, ponchos, and crotches cannot be separated by weights
   alone: cap-guarded `fix` avoids turning them into flat stretched
-  sheets, while `meshkit`'s cut (`cut_fix` above: `7.48% → 4.71%` on
+  sheets, while an external unfuse leg-cut (`cut_fix` above: `7.48% → 4.71%` on
   `cast_08`, `3.99% → 2.74%` and `PASS` on `cast_04`) separates the
   geometry where appropriate.

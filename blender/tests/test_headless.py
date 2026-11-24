@@ -1,6 +1,6 @@
 # Headless end-to-end test for the WeightForge Blender extension.
 #
-# Run with the Blender app binary (not the ~/.local/bin/blender shim):
+# Run with the full Blender app binary (not a PATH wrapper shim):
 #
 #   /Applications/Blender.app/Contents/MacOS/Blender --background \
 #       --factory-startup --python blender/tests/test_headless.py

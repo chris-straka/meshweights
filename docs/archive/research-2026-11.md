@@ -51,7 +51,7 @@ non-commercial or unlicensed repo is copied; ideas only.
   panels (Python, GPU).
 - PartField (NVIDIA, **non-commercial**): nothing copied.
 - No 2023-2026 paper found that separates self-contacting limbs on a
-  generated humanoid; meshkit's unfuse is ahead of published work.
+  generated humanoid; mesh-space unfuse cuts are ahead of published work.
 
 ## Measuring deformation
 
@@ -72,4 +72,4 @@ on a 1 m mesh. SkinTokens' bleed and IoU checks as above.
    Puppeteer, Cut-Cell).
 
 What was tried from this list, and kept or dropped, is logged in the round
-reviews (`docs/review-*.md`).
+reviews (`docs/archive/review-2026-11-13.md`).

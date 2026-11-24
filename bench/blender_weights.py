@@ -79,7 +79,7 @@ def heat(obj, arm):
         obj.modifiers.remove(m)
     obj.vertex_groups.clear()
     # Bone heat has fixed tolerances and finds no solution on a small
-    # figure (Pum, 0.98 m: nothing bound; at ten times the size, all but
+    # figure (compact figure, 0.98 m: nothing bound; at ten times the size, all but
     # 20 of 3726 vertices). Weights don't depend on size: bind at ten
     # times, then scale back.
     up = Matrix.Scale(HEAT_SCALE, 4)

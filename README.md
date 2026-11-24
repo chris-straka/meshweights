@@ -1,18 +1,24 @@
 # meshweights
 
-Finds and fixes bad skin weights on rigged game characters, especially
-AI-generated ones (Tripo, SkinTokens, UniRig). Rust core + `weights` CLI + Blender
-extension, same split as retopo. GLB in, GLB out, rfcheck-clean.
+Standalone, engine-agnostic skin-weight QA and repair for rigged game
+characters and creatures, especially AI-generated ones (Tripo,
+SkinTokens, UniRig). Built as an MIT-licensed Rust core + `weights` CLI
+plus a GPL Blender extension (`blender/weightforge/`). GLB in, GLB out,
+structural rig-contract clean (`rfcheck`-compatible).
 
-rfcheck checks structure (≤4 influences, sums to 1). meshweights moves the
-rig through a range of motion, measures what breaks (tears, collapsed
-elbows, a hand that follows the thigh, a cape on the wrong bone, speckled
-weights), repairs it, and proves the repair with numbers and pictures.
+Structural checkers verify static invariants (≤4 influences, normalized
+weights). `meshweights` poses the rig through range-of-motion poses and
+animation clips, measures what visibly breaks (tears, collapsed elbows,
+a hand that follows the thigh, a cape on the wrong bone, speckled
+weights), repairs only `JOINTS_0`/`WEIGHTS_0`, and proves the result with
+numbers and before/after renders.
 
-Status: P0–P3 and P5's Blender extension built and gated on fixtures; P4
-(owner-rated Tripo set) is open; the assetgen hook is built, its live run pending. Gate numbers:
-[`docs/phase-0.md`](docs/phase-0.md) … [`docs/phase-5.md`](docs/phase-5.md).
-Spec: [PLAN.md](PLAN.md).
+Status: humanoid QA, repair, and game-camera blind judging are in active
+use alongside the Blender extension; non-human/quadruped calibration is
+the active focus ([`docs/rig-score.md`](docs/rig-score.md#calibration-roadmap-non-human--quadruped-rigs)).
+Documentation index: [`docs/README.md`](docs/README.md).
+Spec & roadmap: [`PLAN.md`](PLAN.md). Archived gates:
+[`docs/archive/phase-0.md`](docs/archive/phase-0.md) … [`docs/archive/phase-5.md`](docs/archive/phase-5.md).
 
 ## Build
 
@@ -65,10 +71,10 @@ of another limb, or the torso with a forearm, hand, shin or foot),
 `stiff_bends` (a belt, buckle, pouch or plate bending), `limb_through`
 (a limb inside another part: reported beside the tears, as the clips
 cause it as often as the weights), `stretch` (past 3.5x), `volume`,
-`bleed`, `noise` (only speckle that shows in a pose). Amounts are for a
-body 1.75 m tall. The clips are the file's own (a rig animated by
-motionforge `animate` carries the game's), or `--motion hero.glb`'s put on
-the rig by bone role (measuring only; nothing is written). The 0-100 score
+`bleed`, `noise` (only speckle that shows in a pose). Amounts are normalized
+to a 1.75 m body scale. The clips are the file's own embedded animation
+clips (if present), or `--motion character.glb`'s clips put on the rig by
+bone role (measuring only; nothing is written). The 0-100 score
 follows as the older measure; JSON keeps `score`, `pass` and the findings
 below, and adds `headline` and `anatomy`.
 
@@ -97,7 +103,10 @@ feet are chains ending at the floor, legs climb from them, arms reach
 farthest to each side of the spine, the head owns the crown; sides come
 from position. Humanoids get `poses/humanoid.ron`, four-legged bodies
 `poses/quadruped.ron`, other legged bodies leg swings and bends, anything
-else per-bone bends. Every skin of the file is read; a mesh parented to a
+else per-bone bends (no clips by default unless supplied with `--motion`;
+humanoid ROM calibration is complete, while non-human/quadruped ROM
+calibration is an active milestone in [`docs/rig-score.md`](docs/rig-score.md#calibration-roadmap-non-human--quadruped-rigs)).
+Every skin of the file is read; a mesh parented to a
 bone without a skin is checked riding it (never written); each bone's
 tail is decided on its own; a skeleton exported flat (deform bones
 without the bones joining them) gets links by position. Findings: `D_STRETCH`, `D_VOLUME`,
@@ -128,31 +137,30 @@ seam blend, smoothing, armpit/groin bands) are in limb radii, not edge
 rings, so the fix works the same at any mesh density. Details and
 evidence: [`docs/pick-and-bands.md`](docs/pick-and-bands.md).
 `--skintokens` adds the ML candidate: SkinTokens weights for the input's
-own skeleton (`skintokens skin`, sibling repo `~/Games/_blender/skintokens`,
-Rust, ~20 s on the M4; opt-in, so default runs stay byte-deterministic).
-Blender's automatic weights (bone heat) and rigforge's geodesic voxel
-weights on the input's own skeleton are candidates the same way:
-`bench/blender_weights.py IN OUT --method heat|voxel` makes them (heat
+own skeleton (`skintokens skin` via `$SKINTOKENS_BIN` or `PATH`, ~20 s on
+an Apple M4; opt-in, so default runs stay byte-deterministic).
+Blender's automatic weights (bone heat) and external voxel weights on
+the input's own skeleton can be passed as candidates the same way:
+`bench/blender_weights.py IN OUT --method heat|voxel` creates them (heat
 is bound at ten times the size, since it binds nothing on a small
-figure), `--candidate OUT` offers them. Alone they tear about twice as
-much as the route's weights on the cast; as candidates they win regions
-on four of ten (docs/review-2026-11-13.md, round 3).
-On a body whose fused legs were cut apart (meshkit `tools/unfuse.py`
-records the cut in the file; see "Legs that share one shell" below) the
-fix starts from each half following its own leg, and one more candidate
-is built: `limbs-apart`.
+figure), and `--candidate OUT` evaluates them. On test casts, heat and
+voxel alone tear roughly twice as much, while winning regions on four of
+ten rigs as candidates ([`docs/archive/review-2026-11-13.md`](docs/archive/review-2026-11-13.md), round 3).
+On a body whose fused legs were separated in mesh space (an external unfuse
+pass recording `extras.unfuse` in the GLB; see "Legs that share one shell"
+below) the fix starts from each half following its own leg, and one more
+candidate is built: `limbs-apart`.
 It writes `fixed.glb` (in place: only JOINTS_0/WEIGHTS_0 bytes change,
 never positions or bones), `fixed.report.json` (before/after per region,
 method chosen, candidate scores), and with `--sheet` the A/B picture.
 
 ## Twist/helper bones
 
-The standard humanoid skeleton has helper bones at the upper arms and thighs
-(`DEF-upper_arm_twist.L` ..., added by motionforge's standardize). Each
-sits on its driver's joint and turns by a share (0.5) of the driver's
-rotation; clips bake that, and meshweights poses them the same way
-(`core/src/helpers.rs`: node `extras.helper_bone`, else the `_twist`
-name). Helpers are not pose roles and not regions of their own, and
+The standard humanoid skeleton uses twist helper bones at the upper arms
+and thighs (`DEF-upper_arm_twist.L`, etc.). Each sits on its driver's
+joint and turns by a share (0.5) of the driver's rotation; clips bake
+that, and meshweights poses them the same way (`core/src/helpers.rs`:
+node `extras.helper_bone`, else the `_twist` name). Helpers are not pose roles and not regions of their own, and
 noise is judged on what a vertex does (a helper weight counts as half
 driver, half parent), so unweighted helpers leave `check` unchanged.
 
@@ -172,8 +180,7 @@ body: hips 0.4, thighs 0.3 / 0.3 came out moving as 0.3 / 0.171). Why: SkinToken
 or two edges wide, so a 90 deg swing tears those edges; widening it
 alone collapses the joint, and the half-turn helper holds the volume.
 
-A stylized hero game mesh, fresh SkinTokens rig (seed 0), standardized
-(2026-10-05; sheets in `~/Downloads/twist-bones/`):
+A stylized humanoid game mesh, fresh SkinTokens rig (seed 0):
 
 |                 | raw              | after `weights fix` |
 | --------------- | ---------------- | ------------------- |
@@ -186,14 +193,13 @@ and left upper arm volume in `arm_forward.L` (7 verts, front fold).
 Gate unchanged.
 
 Later the same day (exact region pick, bands in limb radii; gate
-unchanged): the assetgen rehearsal of the hero (repair-topology with
-`--skeleton`, 4,459 welded verts) fixes 62.7 -> 76.0 and **passes**,
-where it stopped at 75.7 with one left-arm finding. The same character
-remeshed at 2.5k / 4.5k / 7k verts now fixes to 77.2 / 76.2 / 76.3 (mean
-of 3 SkinTokens seeds; was 73.3 / 75.4 / 77.8), passing in 5 of 9 runs
-(was 2). After animation, the game's `attack_3` overhead swing still
-fails the recheck. See [`docs/pick-and-bands.md`](docs/pick-and-bands.md);
-sheets in `~/Downloads/weightforge-fix/`.
+unchanged): a 4,459-vertex humanoid mesh fixes 62.7 -> 76.0 and
+**passes**, where it previously stopped at 75.7 with one left-arm
+finding. The same character remeshed at 2.5k / 4.5k / 7k verts fixes to
+77.2 / 76.2 / 76.3 (mean of 3 SkinTokens seeds; was 73.3 / 75.4 / 77.8),
+passing in 5 of 9 runs (was 2). Under extreme overhead animations (`attack_3`)
+shoulders raised past the head still require corrective blend shapes or clip limits.
+See [`docs/pick-and-bands.md`](docs/pick-and-bands.md).
 
 ## Legs that share one shell
 
@@ -202,12 +208,11 @@ trousers, or stands with its thighs together, the shell below the hips is
 one lump holding both thighs; the rig splits the lump down the middle, one
 half on each thigh, and it tears there when a leg lifts (`hip_forward`).
 No weights repair that: spread the split wider and the skin stops
-tearing and collapses instead (measured, `docs/unfuse-log.md`). The
-repair is a cut, and it is a mesh edit, so it is not made here:
-`meshkit/tools/unfuse.py` slits the lump along the plane between the
-legs from the hip joints down and walls each half, and writes the cut
-into the mesh's `extras.unfuse`. On such a file `fix`
-(`core/src/unfuse.rs`):
+tearing and collapses instead (measured, [`docs/archive/unfuse-log.md`](docs/archive/unfuse-log.md)). The
+repair is a cut, and it is a mesh edit, so it is not made here: an
+upstream unfuse step slits the lump along the plane between the legs
+from the hip joints down, walls each half, and writes the cut into the
+mesh's `extras.unfuse`. On such a file `fix` (`core/src/unfuse.rs`):
 
 - starts from `own_legs`, not from the file's weights (a cut leaves them
   interpolated across it): skin whose outline (a horizontal cut through
@@ -220,12 +225,10 @@ into the mesh's `extras.unfuse`. On such a file `fix`
 
 A file that was not cut gets neither, and `fix` runs on it as before
 (`check` always reports a file as it is).
-`motion/tools/tripo_rig.py --unfuse` runs the cut and keeps it only
-when the cut copy ranks better. Bench and numbers: `bench/unfuse.py`,
-`docs/unfuse-log.md`. Probes (`rust/core/examples`): `fused_probe` (what
-joins two limbs, cross-sections, failing vertices per pose),
-`worst_edges` (the most stretched edges of a pose), `limbs_apart_try`
-(the weights step alone).
+Bench and numbers: `bench/unfuse.py`, [`docs/archive/unfuse-log.md`](docs/archive/unfuse-log.md).
+Probes (`rust/core/examples`): `fused_probe` (what joins two limbs,
+cross-sections, failing vertices per pose), `worst_edges` (the most
+stretched edges of a pose), `limbs_apart_try` (the weights step alone).
 
 ## Blender
 

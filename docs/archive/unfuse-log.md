@@ -8,12 +8,12 @@ what was kept.
 
 ## Where it stands
 
-**On by default: nothing new.** `motionforge/tools/tripo_rig.py` without
+**On by default: nothing new.** Running the rig route without `--unfuse`
 flags makes the same rigs as before. `weights fix` on a file that
 records no cut does exactly what it did (its tests and goldens are
-unchanged). `meshkit/tools/unfuse.py` run by hand cuts legs only.
+unchanged). An external unfuse script run by hand cuts legs only.
 
-**`tripo_rig.py --unfuse`** (off by default, humans only). For each seed
+**`--unfuse` leg-cut mode** (opt-in, humanoids only). For each seed
 it also makes a cut copy of the standardized rig: `unfuse.py` slits the
 lump that holds both thighs along the plane between the legs, from the
 hip joints down, walls each half, and records the cut in the file. The
@@ -112,7 +112,7 @@ stretches into a web when the arm lifts. Most rigs' arms are free.
    ten minutes a rig and holds a machine-wide lock, and a Blender import
    and export of a rigged model would rewrite the skeleton. The cut
    became a direct edit of the GLB instead (3).
-3. **Cut the lump in two in the GLB** (kept): `meshkit/tools/unfuse.py`.
+3. **Cut the lump in two in the GLB** (kept): external unfuse cut pass.
    The plane through the midpoint of the hip joints; the plane's curves
    on the surface below the crotch height are cut where the outline
    goes round both legs; each half is closed with a wall; the cut is
@@ -288,8 +288,8 @@ left / right, armpit vertices). `base`: `weights fix` on the rig as made.
   the same bytes.
 - Contract: `rfcheck --class npc` is clean on all 20 cut and fixed rigs
   (a cut adds 150 to 600 vertices before welding).
-- The route: `motionforge/tools/tripo_rig.py --unfuse` on one rig of the
-  set, with SkinTokens stood in for by the rig it made earlier: the
+- The route: `--unfuse` on one rig of the set, with SkinTokens stood in for
+  by the rig it made earlier: the
   uncut try 36.3 with 3 failing findings, the cut try 58.1 and passing;
   the cut copy is the one kept.
 - The website's own auto-rig, at game budget on two of the characters

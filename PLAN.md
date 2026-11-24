@@ -1,12 +1,10 @@
-# meshweights — build plan
+# meshweights — build plan & roadmap
 
-Automatic skin-weight QA and repair for game-bound characters. Written
-2026-10-04 for the games' asset pipeline (`~/Games/_tools/asset-pipeline.md`).
-The weight gate runs in the two rig routes: motion's `tools/tripo_rig.py`
-(people: `weights fix`, then `weights check`) and skintokens'
-`tools/creature_route.py` (creatures). assetgen (`gen`, formerly genforge;
-`~/Games/_media/assetgen/PLAN.md` P7) still calls the weights adapter in its
-character chain, though it is not where the routes run.
+Standalone, engine-agnostic automatic skin-weight QA and repair for
+game-bound characters and creatures (`weights` CLI, MIT Rust core, GPL
+Blender extension). Designed to run as a weight gate after auto-rigging
+and before animation or game-engine export across any character or
+creature asset pipeline.
 
 ## Why
 
@@ -14,7 +12,7 @@ Tripo's auto-rig and other ML riggers give weights that pass structural
 checks (rfcheck: ≤4 influences, weights sum to 1) but still deform badly:
 elbows and knees collapse ("candy wrapper"), a hand vertex follows the
 thigh, a cape tears off the back, the face pulls with the neck. rfcheck can't
-see any of this because it doesn't move the rig. weightforge moves the rig,
+see any of this because it doesn't move the rig. meshweights moves the rig,
 measures what breaks, fixes it, and proves the fix with numbers and pictures.
 
 ## What it does
@@ -65,18 +63,16 @@ report, and a pose sheet with bad vertices painted red.
 3. **Transfer + inpaint:** copy weights from a known-good rigged base where
    the surfaces match closely, and inpaint the rest (robust skin weight
    transfer via weight inpainting, Abdrashitov et al., SIGGRAPH Asia 2023).
-   wrapforge's fitted base body is the source for humanoids.
+   A fitted base body supplied via `--source` is used for humanoids.
 4. **Optimize:** minimize deformation error over the ROM pose set with
    smoothness and locality terms, starting from the best candidate
    (bounded-biharmonic-style constraints: weights in [0,1], partition of
    unity, sparse).
 5. **ML candidate:** SkinTokens weights for the rig's own skeleton
-   (`weights fix --skintokens` runs `skintokens skin` from
-   `~/Games/_blender/skintokens`) as one more candidate, never trusted
-   blindly; it gets scored like the rest. SkinTokens replaced UniRig
-   (`unirig-mac`, retired) on 2026-10-05: on the genforge rehearsal hero
-   its own rig scores 47.9 raw / 61.6 fixed against UniRig's 10.1 / 33.6
-   and the game rig's 22.0 / 37.2 (`skintokens/docs/evaluation.md`).
+   (`weights fix --skintokens` runs `skintokens skin` via `$SKINTOKENS_BIN`
+   or `PATH`) as one more candidate, never trusted blindly; it gets scored
+   like the rest (higher raw and fixed quality on humanoid test rigs than
+   the retired UniRig baseline).
 
 The original Tripo weights are always candidate 0, so a fix never scores
 worse than what came in.
@@ -87,7 +83,7 @@ worse than what came in.
   voxel geodesics, solvers. Reads/writes GLB with `gltf`. Byte-deterministic.
 - `weights` CLI over the core.
 - `blender/weightforge/` (GPL): panel with check, sheet, fix, and a heatmap
-  view; talks to the CLI over files, like retopoforge.
+  view; talks to the CLI over files.
 - Pose sheets rendered headless with Blender, or in-process (wgpu), whichever
   the P0 spike shows is simpler.
 - Licences: check every paper's reference code and every crate before use.
@@ -95,19 +91,30 @@ worse than what came in.
 
 ## Phases and gates
 
-| Phase | Builds | Gate (numbers in `docs/phase-N.md`) |
+| Phase | Builds | Gate (numbers in [`docs/archive/`](docs/README.md)) |
 |---|---|---|
 | P0 | Core: GLB read/write, skinning, ROM pose sets (RON), `check` with volume/stretch/bleed/noise metrics, JSON report | Synthetic fixtures with injected faults (noise, hand→thigh bleed, missing elbow falloff, cape on wrong bone): every fault found, 0 false alarms on the clean twin |
 | P1 | `sheet`: ROM pose sheet with red bad-vertex overlay; `compare` A/B sheet | Golden images on the fixture mannequin; sheet readable on a phone (checked by eye) |
 | P2 | `fix` methods 1-2 (clean-up, geodesic voxel binding) + per-region picking and seam blending | On fixtures: weight error vs ground truth drops ≥80%; deformation score better on every faulted region; output passes rfcheck |
 | P3 | Methods 3-4 (transfer + inpaint, optimization) | Beats P2 on the 10 worst regions of the real test set |
-| P4 | Real assets: 10+ Tripo-rigged characters (humanoid + creature) from genforge, SkinTokens candidate | Report per asset; judged in blind picture pairs at the game camera ([`docs/blind.md`](docs/blind.md)), and the owner sees before/after pictures in the chat when a call is theirs; ≥8/10 rated better or equal |
-| P5 | Blender extension + rig-route weight gate (motion's `tools/tripo_rig.py` for people, skintokens' `tools/creature_route.py` for creatures; assetgen P7's character chain also calls the weights adapter: `weights check`, then `fix` on failure) | One end-to-end route run: Tripo rig fails check → fixed → passes, with sheets for a blind pair or the chat |
+| P4 | Real assets: 10+ auto-rigged characters (humanoid + creature), SkinTokens candidate | Report per asset; judged in blind picture pairs at the game camera ([`docs/blind.md`](docs/blind.md)), ≥8/10 rated better or equal |
+| P5 | Blender extension + weight-gate CLI integration (`weights check`, then `fix` on failure) | End-to-end headless Blender + CLI run: faulted rig fails check → fixed → passes, with before/after sheets |
+
+## Non-human & quadruped calibration roadmap
+
+Real-clip tears already separate hand-made artist animals cleanly from
+generated creatures (`docs/rig-score.md`), while generic ±45° per-bone
+ROM sweeps fail on complex 55–107 bone artist rigs and pre-fixed
+creature benchmarks yield sub-pixel changes at game camera framing. Next:
+
+1. **Creature-specific ROM poses and gait clips:** Replace uniform ±45° per-bone sweeps with anatomy-keyed pose sets (`quadruped`, `winged`, `multi_limb`) and locomotion clips (`walk`, `trot`, `lunge`, `attack`).
+2. **Raw pre-`fix` generated creature benchmark inputs:** Run calibration on un-fixed auto-rigged creatures so `fix` produces visible game-camera claims rather than second-pass sub-pixel edits.
+3. **Asymmetric gait frames for blind planted swaps:** Select opposite-phase stride frames for planted left/right limb swaps so symmetric poses under manes or tails do not hide swaps.
 
 ## Rules
 
 - Never ship a fix without before/after numbers and a sheet.
-- Never move vertices; weightforge only changes weights (topology and shape
-  belong to retopoforge and wrapforge).
+- Never move vertices; meshweights only changes weights (topology and shape
+  belong to upstream mesh tools).
 - Keep the bone names and hierarchy the GLB came with; renaming and
-  retargeting belong to rigforge/motionforge.
+  retargeting belong to upstream rigging and animation tools.

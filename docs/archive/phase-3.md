@@ -42,5 +42,5 @@ names withheld). 10 worst input regions across the set:
 | F/r4 | 6.9 | 49.1 | 51.6 | optimize |
 
 P3 better on 6/10, never worse (ties are regions P2 already brings to
-~100). Caveat: the plan's real test set is Tripo-rigged characters from
-genforge; none exist on this machine yet, so this is UniRig output.
+~100). Caveat: the real test set in the plan was Tripo-rigged characters
+from the character pipeline; none existed locally yet, so this used UniRig output.
