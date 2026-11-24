@@ -13,9 +13,10 @@ a hand that follows the thigh, a cape on the wrong bone, speckled
 weights), repairs only `JOINTS_0`/`WEIGHTS_0`, and proves the result with
 numbers and before/after renders.
 
-Status: humanoid QA, repair, and game-camera blind judging are in active
-use alongside the Blender extension; non-human/quadruped calibration is
-the active focus ([`docs/rig-score.md`](docs/rig-score.md#calibration-roadmap-non-human--quadruped-rigs)).
+Status: humanoid and creature QA (quadruped, winged, multi-limb, and axial
+bodies), repair, and asymmetric game-camera blind judging are in active use
+alongside the Blender extension
+([`docs/rig-score.md`](docs/rig-score.md#creature-calibration-benchcreature_calibpy)).
 Documentation index: [`docs/README.md`](docs/README.md).
 Spec & roadmap: [`PLAN.md`](PLAN.md). Archived gates:
 [`docs/archive/phase-0.md`](docs/archive/phase-0.md) … [`docs/archive/phase-5.md`](docs/archive/phase-5.md).
@@ -29,7 +30,7 @@ Pure Rust, permissive deps only (serde, serde_json, ron, png, rayon).
 ## Use
 
     weights check   hero.glb [--motion game_hero.glb] [--motion-clips walk,run]
-                    [--poses rom.ron] [--json] [--vertex-json f.json]
+                    [--gait] [--poses rom.ron] [--json] [--vertex-json f.json]
     weights show    hero.glb --out dir/ [--motion game_hero.glb] [--kind wrong_bone] [--top N]
                                                     # a close-up sheet per headline finding
     weights before-after raw.glb fixed.glb --out dir/ --motion game_hero.glb [--top N]
@@ -39,7 +40,7 @@ Pure Rust, permissive deps only (serde, serde_json, ron, png, rayon).
     weights fix     hero.glb --out fixed.glb --sheet ab.png
                     [--method auto|smooth,geodesic,transfer,optimize]
                     [--source base.glb] [--candidate other.glb] [--skintokens]
-                    [--all-regions]
+                    [--all-regions] [--motion game_hero.glb] [--gait]
     weights compare a.glb b.glb --out ab.png        # same poses side by side
     weights compare a.glb b.glb --out ab.png --zoom --label-a THEIRS --label-b OURS --clips clips/
                                                     # which rig is better, by pass then tears (the
@@ -47,7 +48,7 @@ Pure Rust, permissive deps only (serde, serde_json, ron, png, rayon).
                                                     # other way the headline retires it): worst poses
                                                     # first, close-ups in clay, a loop for each pose
     weights probe   hero.glb --out cases/           # unmarked loops for a person to judge
-    weights blind   a.glb b.glb --out pairs/ [--motion hero.glb] [--seed N] [--top N] [--camera follow|talk] [--metrics metrics.ron]
+    weights blind   a.glb b.glb --out pairs/ [--motion hero.glb] [--gait] [--seed N] [--top N] [--camera follow|talk] [--metrics metrics.ron]
                                                     # same-frame blind pairs per claim at the
                                                     # game camera, plus a can't-tell control and
                                                     # a planted bad case; key beside the folder
@@ -102,10 +103,12 @@ Bone roles come from the skeleton's structure, not names (`core/src/anatomy.rs`)
 feet are chains ending at the floor, legs climb from them, arms reach
 farthest to each side of the spine, the head owns the crown; sides come
 from position. Humanoids get `poses/humanoid.ron`, four-legged bodies
-`poses/quadruped.ron`, other legged bodies leg swings and bends, anything
-else per-bone bends (no clips by default unless supplied with `--motion`;
-humanoid ROM calibration is complete, while non-human/quadruped ROM
-calibration is an active milestone in [`docs/rig-score.md`](docs/rig-score.md#calibration-roadmap-non-human--quadruped-rigs)).
+`poses/quadruped.ron`, winged and multi-limb bodies `poses/winged.ron` and
+`poses/multi_limb.ron` alongside conservative chain-distributed curves
+and cranial/rigid protection (`eye`, `horn`, `ear`, `beak`, feathers), plus
+built-in opposite-phase gait keyposes and optional `--gait` locomotion clips
+(`walk`, `trot`, `lunge`, `attack`) when `--motion` is absent
+([`docs/rig-score.md`](docs/rig-score.md#creature-calibration-benchcreature_calibpy)).
 Every skin of the file is read; a mesh parented to a
 bone without a skin is checked riding it (never written); each bone's
 tail is decided on its own; a skeleton exported flat (deform bones

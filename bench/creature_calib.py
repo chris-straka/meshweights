@@ -8,7 +8,8 @@ Mode 1 — Measure & generate blind game-camera pairs:
         [--weights PATH] \\
         [--artists-dir DIR] [--artist NAME=PATH ...] \\
         [--generated-dir DIR] [--generated NAME=PATH ...] \\
-        --out DIR [--seed N] [--top N] [--creature-motion PATH]
+        --out DIR [--seed N] [--top N] [--creature-motion PATH] \\
+        [--gait] [--require-raw]
 
 Mode 2 — Score blind answers & emit final calibration verdict:
     python3 bench/creature_calib.py \\
@@ -55,9 +56,17 @@ def parse_named_spec(spec: str, flag: str) -> tuple:
     return name, os.path.abspath(path)
 
 
-def discover_creatures(dirs: list, explicit: list, flag: str, allow_truth_subdir: bool) -> list:
+def discover_creatures(
+    dirs: list,
+    explicit: list,
+    flag: str,
+    allow_truth_subdir: bool = False,
+    subdir_candidates: tuple = (),
+) -> list:
     items = []
     seen = set()
+    if not subdir_candidates and allow_truth_subdir:
+        subdir_candidates = ("truth.glb",)
 
     def add(name: str, path: str) -> None:
         if not is_valid_name(name):
@@ -75,10 +84,12 @@ def discover_creatures(dirs: list, explicit: list, flag: str, allow_truth_subdir
             if os.path.isfile(full) and entry.lower().endswith(".glb"):
                 stem = os.path.splitext(entry)[0]
                 add(stem, os.path.abspath(full))
-            elif allow_truth_subdir and os.path.isdir(full):
-                truth = os.path.join(full, "truth.glb")
-                if os.path.isfile(truth):
-                    add(entry, os.path.abspath(truth))
+            elif subdir_candidates and os.path.isdir(full):
+                for sub_name in subdir_candidates:
+                    cand = os.path.join(full, sub_name)
+                    if os.path.isfile(cand):
+                        add(entry, os.path.abspath(cand))
+                        break
 
     for spec in explicit:
         name, path = parse_named_spec(spec, flag)
@@ -87,10 +98,17 @@ def discover_creatures(dirs: list, explicit: list, flag: str, allow_truth_subdir
     return items
 
 
-def run_weights_check(weights_bin: str, glb_path: str, creature_motion: str = None) -> dict:
+def run_weights_check(
+    weights_bin: str,
+    glb_path: str,
+    creature_motion: str = None,
+    use_gait: bool = False,
+) -> dict:
     cmd = [weights_bin, "check", glb_path, "--json"]
     if creature_motion:
         cmd.extend(["--motion", creature_motion])
+    elif use_gait:
+        cmd.append("--gait")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except OSError as exc:
@@ -158,13 +176,16 @@ def run_weights_fix(
     fixed_path: str,
     creature_motion: str = None,
     has_own_clips: bool = False,
-) -> None:
+    use_gait: bool = False,
+) -> str:
     os.makedirs(os.path.dirname(os.path.abspath(fixed_path)), exist_ok=True)
     cmd = [weights_bin, "fix", glb_path, "--out", fixed_path]
     if creature_motion:
         cmd.extend(["--motion", creature_motion])
     elif has_own_clips:
         cmd.extend(["--motion", glb_path])
+    elif use_gait:
+        cmd.append("--gait")
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -179,6 +200,7 @@ def run_weights_fix(
 
     if not os.path.isfile(fixed_path):
         raise RuntimeError(f"weights fix did not produce output file: {fixed_path}")
+    return os.path.splitext(fixed_path)[0] + ".report.json"
 
 
 def run_weights_blind(
@@ -189,6 +211,7 @@ def run_weights_blind(
     seed: int,
     top: int,
     creature_motion: str = None,
+    use_gait: bool = False,
 ) -> str:
     os.makedirs(os.path.dirname(os.path.abspath(blind_dir)), exist_ok=True)
     cmd = [
@@ -205,6 +228,8 @@ def run_weights_blind(
     ]
     if creature_motion:
         cmd.extend(["--motion", creature_motion])
+    elif use_gait:
+        cmd.append("--gait")
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -231,6 +256,102 @@ def run_weights_blind(
     if not os.path.isfile(key_path):
         raise RuntimeError(f"weights blind did not write sibling key file: {key_path}")
     return key_path
+
+
+def inspect_fix_report(report_path: str) -> dict:
+    info = {"verts_changed": None, "mean_l1_change": None, "improved": None}
+    if not os.path.isfile(report_path):
+        return info
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return info
+    if not isinstance(doc, dict):
+        return info
+    vc = doc.get("verts_changed")
+    if isinstance(vc, int) and not isinstance(vc, bool):
+        info["verts_changed"] = vc
+    l1 = doc.get("mean_l1_change")
+    if is_finite_number(l1):
+        info["mean_l1_change"] = float(l1)
+    imp = doc.get("improved")
+    if isinstance(imp, bool):
+        info["improved"] = imp
+    return info
+
+
+def inspect_blind_key(key_path: str) -> dict:
+    info = {
+        "claim_count": 0,
+        "distinct_claims": 0,
+        "max_claim_rmse": None,
+        "planted_frame": None,
+        "planted_rmse": None,
+    }
+    if not os.path.isfile(key_path):
+        return info
+    try:
+        with open(key_path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return info
+    if not isinstance(doc, dict):
+        return info
+    pairs = doc.get("pairs")
+    if not isinstance(pairs, list):
+        return info
+    claim_rmses = []
+    for p in pairs:
+        if not isinstance(p, dict):
+            continue
+        cat = p.get("category") or p.get("kind")
+        if cat == "claim":
+            info["claim_count"] += 1
+            rmse = p.get("rmse")
+            if is_finite_number(rmse):
+                claim_rmses.append(float(rmse))
+            if (
+                p.get("expected") not in (None, "tie")
+                and is_finite_number(rmse)
+                and float(rmse) >= 1.0
+            ):
+                info["distinct_claims"] += 1
+        elif cat == "planted":
+            frame = p.get("frame")
+            if isinstance(frame, str):
+                info["planted_frame"] = frame
+            rmse = p.get("rmse")
+            if is_finite_number(rmse):
+                info["planted_rmse"] = float(rmse)
+    if claim_rmses:
+        info["max_claim_rmse"] = max(claim_rmses)
+    return info
+
+
+def detect_pre_fixed(before: dict, after: dict, report_info: dict, key_info: dict) -> bool:
+    verts_changed = report_info.get("verts_changed")
+    if verts_changed == 0:
+        return True
+    claim_count = key_info.get("claim_count", 0)
+    distinct_claims = key_info.get("distinct_claims", 0)
+    max_claim_rmse = key_info.get("max_claim_rmse")
+    if claim_count > 0 and (
+        distinct_claims == 0
+        or (max_claim_rmse is not None and max_claim_rmse < 1.0)
+    ):
+        return True
+    poses_delta = abs(after["poses_tears_pct"] - before["poses_tears_pct"])
+    clips_delta = (
+        abs(after["clips_tears_pct"] - before["clips_tears_pct"])
+        if before["clips_tears_pct"] is not None and after["clips_tears_pct"] is not None
+        else 0.0
+    )
+    max_delta = max(poses_delta, clips_delta)
+    if (before["poses_tears_pct"] > 0.05 or (before["clips_tears_pct"] or 0.0) > 0.05) and max_delta < 0.05:
+        if report_info.get("improved") is False or (verts_changed is not None and verts_changed < 5):
+            return True
+    return False
 
 
 def evaluate_separation(
@@ -268,6 +389,7 @@ def fmt_score(val) -> str:
 
 
 def render_markdown(calib: dict) -> str:
+    pre_fixed_count = sum(1 for g in calib["generated"] if g.get("already_fixed"))
     lines = [
         "# Creature Tears Calibration",
         "",
@@ -280,6 +402,7 @@ def render_markdown(calib: dict) -> str:
         f"| Generated (after fix) | {fmt_pct(calib['generated_after_median_poses'])} | {fmt_pct(calib['generated_after_median_clips'])} |",
         "",
         f"- Worse after fix: **{calib['worse_count']}** / {len(calib['generated'])}",
+        f"- Raw pre-fix inputs: **{len(calib['generated']) - pre_fixed_count}** / {len(calib['generated'])}",
         "",
         "## Artist Creatures",
         "",
@@ -295,8 +418,8 @@ def render_markdown(calib: dict) -> str:
         "",
         "## Generated Creatures (Before -> After `weights fix`)",
         "",
-        "| Name | Poses Tears % | Clips Tears % | Score | Worse |",
-        "|---|---:|---:|---:|---|",
+        "| Name | Stage | Poses Tears % | Clips Tears % | Score | Verts Changed | Distinct Claims | Max Claim RMSE | Planted Frame | Worse |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|---|",
     ])
     for g in calib["generated"]:
         poses_str = f"{fmt_pct(g['before_poses_tears_pct'])} -> {fmt_pct(g['after_poses_tears_pct'])}"
@@ -305,8 +428,13 @@ def render_markdown(calib: dict) -> str:
         else:
             clips_str = "-"
         score_str = f"{fmt_score(g['before_score'])} -> {fmt_score(g['after_score'])}"
+        stage = "pre-fixed" if g.get("already_fixed") else "raw"
+        vc = "-" if g.get("verts_changed") is None else str(g["verts_changed"])
+        dc = str(g.get("distinct_claims", 0))
+        mrmse = "-" if g.get("max_claim_rmse") is None else f"{g['max_claim_rmse']:.2f}"
+        pframe = g.get("planted_frame") or "-"
         lines.append(
-            f"| {g['name']} | {poses_str} | {clips_str} | {score_str} | {'YES' if g['worse'] else 'no'} |"
+            f"| {g['name']} | {stage} | {poses_str} | {clips_str} | {score_str} | {vc} | {dc} | {mrmse} | {pframe} | {'YES' if g['worse'] else 'no'} |"
         )
 
     return "\n".join(lines) + "\n"
@@ -331,10 +459,16 @@ def cmd_measure(args) -> int:
 
     try:
         artist_inputs = discover_creatures(
-            args.artists_dir, args.artist, "--artist", allow_truth_subdir=True
+            args.artists_dir,
+            args.artist,
+            "--artist",
+            subdir_candidates=("truth.glb",),
         )
         generated_inputs = discover_creatures(
-            args.generated_dir, args.generated, "--generated", allow_truth_subdir=False
+            args.generated_dir,
+            args.generated,
+            "--generated",
+            subdir_candidates=("raw.glb", "unfixed.glb"),
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -355,10 +489,11 @@ def cmd_measure(args) -> int:
 
     artists = []
     generated = []
+    use_gait = bool(args.gait and not creature_motion)
 
     try:
         for name, path in artist_inputs:
-            res = run_weights_check(weights_bin, path, creature_motion)
+            res = run_weights_check(weights_bin, path, creature_motion, use_gait=use_gait)
             artists.append({
                 "name": name,
                 "file": os.path.basename(path),
@@ -369,18 +504,19 @@ def cmd_measure(args) -> int:
             })
 
         for idx, (name, path) in enumerate(generated_inputs):
-            before = run_weights_check(weights_bin, path, creature_motion)
+            before = run_weights_check(weights_bin, path, creature_motion, use_gait=use_gait)
             fixed_path = os.path.join(fixed_dir, f"{name}_fixed.glb")
-            run_weights_fix(
+            report_path = run_weights_fix(
                 weights_bin,
                 path,
                 fixed_path,
                 creature_motion=creature_motion,
                 has_own_clips=(before["clips_tears_pct"] is not None),
+                use_gait=use_gait,
             )
-            after = run_weights_check(weights_bin, fixed_path, creature_motion)
+            after = run_weights_check(weights_bin, fixed_path, creature_motion, use_gait=use_gait)
             blind_dir = os.path.join(blind_root, name)
-            run_weights_blind(
+            key_path = run_weights_blind(
                 weights_bin,
                 path,
                 fixed_path,
@@ -388,7 +524,20 @@ def cmd_measure(args) -> int:
                 seed=args.seed + idx,
                 top=args.top,
                 creature_motion=creature_motion,
+                use_gait=use_gait,
             )
+            report_info = inspect_fix_report(report_path)
+            key_info = inspect_blind_key(key_path)
+            already_fixed = detect_pre_fixed(before, after, report_info, key_info)
+            if already_fixed:
+                print(
+                    f"WARN: generated creature {name!r} appears pre-fixed "
+                    f"(verts_changed={report_info['verts_changed']}, "
+                    f"distinct_claims={key_info['distinct_claims']}, "
+                    f"max_claim_rmse={key_info['max_claim_rmse']}); "
+                    f"pass un-fixed raw inputs for visible blind claims",
+                    file=sys.stderr,
+                )
 
             poses_worse = after["poses_tears_pct"] > before["poses_tears_pct"] + TEARS_EPS
             clips_worse = (
@@ -411,6 +560,14 @@ def cmd_measure(args) -> int:
                 "class": before["class"],
                 "seed": args.seed + idx,
                 "worse": worse,
+                "verts_changed": report_info["verts_changed"],
+                "mean_l1_change": report_info["mean_l1_change"],
+                "claim_count": key_info["claim_count"],
+                "distinct_claims": key_info["distinct_claims"],
+                "max_claim_rmse": key_info["max_claim_rmse"],
+                "planted_frame": key_info["planted_frame"],
+                "planted_rmse": key_info["planted_rmse"],
+                "already_fixed": already_fixed,
             })
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -441,6 +598,8 @@ def cmd_measure(args) -> int:
     )
 
     worse_count = sum(1 for g in generated if g["worse"])
+    pre_fixed_names = [g["name"] for g in generated if g["already_fixed"]]
+    raw_ok = not pre_fixed_names
     separation_ok, sep_reasons = evaluate_separation(
         artist_median_poses,
         generated_before_median_poses,
@@ -455,11 +614,17 @@ def cmd_measure(args) -> int:
         reasons.append(
             f"worse tears after fix on {worse_count} generated creature(s): {', '.join(worse_names)}"
         )
+    if args.require_raw and not raw_ok:
+        reasons.append(
+            f"raw pre-fix check failed on pre-fixed creature(s): {', '.join(pre_fixed_names)}"
+        )
 
     calib = {
         "version": 1,
         "seed": args.seed,
         "top": args.top,
+        "require_raw": bool(args.require_raw),
+        "raw_ok": raw_ok,
         "artist_median_poses": artist_median_poses,
         "generated_before_median_poses": generated_before_median_poses,
         "generated_after_median_poses": generated_after_median_poses,
@@ -676,10 +841,23 @@ def cmd_score(args) -> int:
             "judge_agrees_tears": judge_agrees_tears,
         })
 
+    require_raw = bool(calib.get("require_raw"))
+    raw_ok = bool(calib.get("raw_ok", True))
+    if require_raw and not raw_ok:
+        pre_fixed = [g.get("name", "?") for g in generated if g.get("already_fixed")]
+        reasons.append(
+            f"raw pre-fix check failed: pre-fixed creature(s) present ({', '.join(pre_fixed)})"
+        )
+
     agreement_rate = (total_agrees / total_claims) if total_claims > 0 else 0.0
     if total_claims == 0:
         agreement_ok = False
-        reasons.append("no blind claims judged (total_claims == 0)")
+        if any(g.get("already_fixed") for g in generated):
+            reasons.append(
+                "no blind claims judged (total_claims == 0; inputs appear pre-fixed — pass un-fixed raw.glb inputs)"
+            )
+        else:
+            reasons.append("no blind claims judged (total_claims == 0)")
     elif agreement_rate < min_agreement:
         agreement_ok = False
         reasons.append(
@@ -689,13 +867,14 @@ def cmd_score(args) -> int:
     else:
         agreement_ok = True
 
-    passed = separation_ok and never_worse_ok and blind_gates_ok and agreement_ok
+    passed = separation_ok and never_worse_ok and blind_gates_ok and agreement_ok and (not require_raw or raw_ok)
 
     verdict_doc = {
         "pass": passed,
         "separation_ok": separation_ok,
         "never_worse_ok": never_worse_ok,
         "blind_gates_ok": blind_gates_ok,
+        "raw_ok": raw_ok,
         "total_claims": total_claims,
         "total_agrees": total_agrees,
         "agreement_rate": agreement_rate,
@@ -751,7 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="DIR",
-        help="directory of generated creature .glb files; repeatable",
+        help="directory of raw generated creature .glb files (or <subdir>/raw.glb); repeatable",
     )
     ap.add_argument(
         "--generated",
@@ -781,6 +960,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--creature-motion",
         metavar="PATH",
         help="optional creature-gait motion GLB passed via --motion",
+    )
+    ap.add_argument(
+        "--gait",
+        action="store_true",
+        help="enable built-in neutral creature gait clips (--gait) when --creature-motion is omitted",
+    )
+    ap.add_argument(
+        "--require-raw",
+        action="store_true",
+        help="fail Mode 1/2 if any generated creature appears pre-fixed with sub-pixel blind claims",
     )
     ap.add_argument(
         "--score",

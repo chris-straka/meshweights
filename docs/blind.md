@@ -221,12 +221,32 @@ voxel graph `330e405`, fleet `2c2mp3sz`) and post-`meshweights-7`
 - **Blind game-camera validity (`2ustx28k`, 30 pairs judged blind before
   unsealing keys)**: **5/5 controls** passed (`cant_tell`), **5/5 planted
   swaps** were flagged by tears on `game clips`, and **3/5 planted swaps**
-  were spotted by eye at the 75° / 3.0 m game camera. The two eye misses
-  are concrete checker findings: `human_02` picked a supine `death@1.00s`
-  frame (hard to read at 38% frame height), and `creature_02` picked a
-  symmetric `attack@0.53s` lunge under a thick mane where opposite front
-  limbs move nearly identically (picking an opposite-phase gait frame such
-  as `walk`/`trot` would make planted swaps clearer on maned quadrupeds).
+  were spotted by eye at the 75° / 3.0 m game camera. Those two historical
+  eye misses motivated the asymmetric planted-swap frame selection below.
+
+## Asymmetric & non-human planted-swap frames
+
+- **Humanoid uprightness (`is_upright_pose`):** Excludes leaning or supine
+  poses (such as `death`) using torso vertical delta (`posed_dy >= 0.55 *
+  rest_dy`) alongside `head_share >= 0.6`.
+- **Asymmetry scoring (`swap_asymmetry`):** Measures left-vs-right limb pose
+  divergence relative to torso and bind rest (`0.0` at rest and symmetric
+  lunges, high on opposite-phase `walk`/`trot` strides and single-limb swings).
+  `planted_candidates` ranks poses by displaced area weighted with asymmetry
+  and covers bipeds, quadrupeds (`foreleg`, `leg`), wings (`wing*`), aquatic
+  fins (`fin*`), multi-legged chains (`legK`), unequal L/R chain lengths via
+  normalized pairing, and geometric bilateral limbs.
+- **Claim reuse vs. dedicated asymmetric frame (`cmd/blind.rs`):** An existing
+  claim frame is reused for the planted pair only when upright, visually clear,
+  and asymmetric (`asymmetry >= 0.08` when asymmetric frames exist), preventing
+  symmetric `attack` lunges from overriding opposite-phase gait frames. When
+  every input frame is mirror-symmetric, `asymmetric_planted_pose` synthesizes
+  an upright `asymmetric_stride` frame so the planted swap stays clearly readable.
+- **Verified held-out creature planted selection:** Running `weights blind` on
+  `creature_01..03` selects opposite-phase trot frames instead of symmetric
+  lunges (`creature_01`: `foreleg` at `trot@0.20s`, RMSE `17.47`; `creature_02`:
+  `leg` at `trot@0.00s`, RMSE `20.65`; `creature_03`: `foreleg` at `trot@0.00s`,
+  RMSE `36.48`; all `tears_winner: A`).
 
 ## Remaining limits
 

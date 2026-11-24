@@ -11,13 +11,9 @@ Standalone, engine-agnostic skin-weight QA and repair for rigged character and c
 | [`blind.md`](blind.md) | Same-frame game-camera blind pair protocol (`blind` / `blind-score`), control & planted-swap gates, score retirement |
 | [`pick-and-bands.md`](pick-and-bands.md) | Exact branch-and-bound region picking (`pick.rs`) and metric limb-radius repair bands |
 
-## Non-human & quadruped calibration status & roadmap
+## Creature calibration & blind checks
 
-Real animation clips already separate artist-authored non-human rigs from generated creatures, while generic range-of-motion poses and pre-fixed benchmark inputs do not yet support a passing end-to-end calibration gate (see [`rig-score.md`](rig-score.md#creature-calibration-benchcreature_calibpy)):
-
-1. **Creature-specific ROM poses and gait clips:** Replace uniform ±45° per-bone sweeps (which over-bend complex 55–107 bone artist rigs and invert pose medians) with species-appropriate pose sets and locomotion clips (`walk`, `trot`, `lunge`, `attack`).
-2. **Raw pre-`fix` creature benchmark inputs:** Run calibration against un-fixed generated creature rigs so `weights fix` produces visible game-camera claims rather than sub-pixel second-pass edits (`total_claims == 0`).
-3. **Asymmetric blind planted-swap frames:** Prefer opposite-phase gait frames when picking planted left/right limb-swap controls so thick manes or symmetric attack poses cannot hide the swapped limb.
+Non-humanoid QA supports anatomy-keyed ROM presets (`poses/quadruped.ron`, `poses/winged.ron`, `poses/multi_limb.ron`), chain-distributed conservative bends for deep spine/tail/wing/fin/tentacle skeletons, optional neutral creature gait clips (`--gait`: `walk`, `trot`, `lunge`, `attack`), opposite-phase asymmetric blind planted-swap selection (`asymmetric_stride` fallback when poses are symmetric), and raw pre-`fix` calibration enforcement (`bench/creature_calib.py --require-raw`); see [`rig-score.md`](rig-score.md#creature-calibration-benchcreature_calibpy) and [`blind.md`](blind.md).
 
 ## Archived R&D and gate logs (`archive/`)
 

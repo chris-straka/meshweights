@@ -100,16 +100,18 @@ worse than what came in.
 | P4 | Real assets: 10+ auto-rigged characters (humanoid + creature), SkinTokens candidate | Report per asset; judged in blind picture pairs at the game camera ([`docs/blind.md`](docs/blind.md)), ≥8/10 rated better or equal |
 | P5 | Blender extension + weight-gate CLI integration (`weights check`, then `fix` on failure) | End-to-end headless Blender + CLI run: faulted rig fails check → fixed → passes, with before/after sheets |
 
-## Non-human & quadruped calibration roadmap
+## Non-human & quadruped calibration
 
-Real-clip tears already separate hand-made artist animals cleanly from
-generated creatures (`docs/rig-score.md`), while generic ±45° per-bone
-ROM sweeps fail on complex 55–107 bone artist rigs and pre-fixed
-creature benchmarks yield sub-pixel changes at game camera framing. Next:
+Implemented across [`docs/rig-score.md`](docs/rig-score.md#creature-calibration-benchcreature_calibpy)
+and [`docs/blind.md`](docs/blind.md#asymmetric--non-human-planted-swap-frames):
 
-1. **Creature-specific ROM poses and gait clips:** Replace uniform ±45° per-bone sweeps with anatomy-keyed pose sets (`quadruped`, `winged`, `multi_limb`) and locomotion clips (`walk`, `trot`, `lunge`, `attack`).
-2. **Raw pre-`fix` generated creature benchmark inputs:** Run calibration on un-fixed auto-rigged creatures so `fix` produces visible game-camera claims rather than second-pass sub-pixel edits.
-3. **Asymmetric gait frames for blind planted swaps:** Select opposite-phase stride frames for planted left/right limb swaps so symmetric poses under manes or tails do not hide swaps.
+- Anatomy-keyed creature ROM presets (`poses/quadruped.ron`, `poses/winged.ron`,
+  `poses/multi_limb.ron`), chain-distributed conservative bends, rigid/cranial
+  protection, and built-in `--gait` locomotion clips (`walk`, `trot`, `lunge`, `attack`).
+- Raw pre-`fix` calibration workflow in `bench/creature_calib.py` (`raw.glb` discovery,
+  pre-fixed sub-pixel detection, `--require-raw`, `--gait`).
+- Asymmetric opposite-phase blind planted-swap frame selection and `asymmetric_stride`
+  synthesis in `blind.rs` / `cmd/blind.rs`.
 
 ## Rules
 
