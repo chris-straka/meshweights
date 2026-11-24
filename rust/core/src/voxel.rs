@@ -97,6 +97,9 @@ fn tri_shells(nverts: usize, tris: &[[u32; 3]]) -> Vec<u32> {
         x
     }
     for t in tris {
+        if t.iter().any(|&v| v as usize >= nverts) {
+            continue;
+        }
         let a = find(&mut parent, t[0]);
         for &v in &t[1..] {
             let b = find(&mut parent, v);
@@ -105,7 +108,7 @@ fn tri_shells(nverts: usize, tris: &[[u32; 3]]) -> Vec<u32> {
             }
         }
     }
-    tris.iter().map(|t| find(&mut parent, t[0])).collect()
+    tris.iter().map(|t| if (t[0] as usize) < parent.len() { find(&mut parent, t[0]) } else { 0 }).collect()
 }
 
 /// Watertight 2D point-in-triangle test along one projection axis using
@@ -158,12 +161,16 @@ fn ray_analysis(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], shell: &[u32], use_tr
         let mut hits: Vec<Vec<(f64, u32)>> = vec![Vec::new(); nu * nv];
 
         for (ti, &t) in tris.iter().enumerate() {
-            if !use_tri(ti) {
+            if !use_tri(ti) || t.iter().any(|&v| v as usize >= pos.len()) {
                 continue;
             }
-            let c0 = g.coord(pos[t[0] as usize]);
-            let c1 = g.coord(pos[t[1] as usize]);
-            let c2 = g.coord(pos[t[2] as usize]);
+            let (p0, p1, p2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+            if [p0, p1, p2].iter().any(|p| !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite()) {
+                continue;
+            }
+            let c0 = g.coord(p0);
+            let c1 = g.coord(p1);
+            let c2 = g.coord(p2);
             let (a, b, cc) = ((c0[ua], c0[va]), (c1[ua], c1[va]), (c2[ua], c2[va]));
             let area = (b.0 - a.0) * (cc.1 - a.1) - (b.1 - a.1) * (cc.0 - a.0);
             if area.abs() < 1e-14 {
@@ -320,7 +327,7 @@ fn ray_analysis(g: &Grid, pos: &[Vec3], tris: &[[u32; 3]], shell: &[u32], use_tr
 fn openings(pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) -> bool) -> (usize, f64) {
     let mut edges: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
     for (ti, t) in tris.iter().enumerate() {
-        if !use_tri(ti) {
+        if !use_tri(ti) || t.iter().any(|&v| v as usize >= pos.len()) {
             continue;
         }
         for k in 0..3 {
@@ -353,8 +360,8 @@ fn openings(pos: &[Vec3], tris: &[[u32; 3]], use_tri: &dyn Fn(usize) -> bool) ->
     let verts: Vec<u32> = parent.keys().copied().collect();
     let mut boxes: std::collections::BTreeMap<u32, (Vec3, Vec3)> = std::collections::BTreeMap::new();
     for v in verts {
+        let Some(&p) = pos.get(v as usize) else { continue };
         let r = find(&mut parent, v);
-        let p = pos[v as usize];
         let e = boxes.entry(r).or_insert((p, p));
         e.0 = e.0.min(p);
         e.1 = e.1.max(p);
@@ -370,31 +377,42 @@ fn voxelize_internal(
     body: Option<&[bool]>,
     compute_edges: bool,
 ) -> (Grid, Solid, RayData, Vec<u32>) {
+    let res = res.clamp(1, 2048);
     let mut lo = v3(f64::MAX, f64::MAX, f64::MAX);
     let mut hi = -lo;
+    let mut any_finite = false;
     for p in pos {
-        lo = lo.min(*p);
-        hi = hi.max(*p);
+        if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+            any_finite = true;
+        }
     }
-    if pos.is_empty() {
+    let mut ext = if any_finite { hi - lo } else { Vec3::ZERO };
+    if !any_finite || !ext.x.is_finite() || !ext.y.is_finite() || !ext.z.is_finite() {
         lo = Vec3::ZERO;
-        hi = Vec3::ZERO;
+        ext = Vec3::ZERO;
     }
-    let ext = hi - lo;
-    let h = (ext.max_elem() / res.max(1) as f64).max(1e-9);
+    let h = (ext.max_elem() / res as f64).max(1e-9);
     let pad = 2.0;
     let origin = lo - v3(pad, pad, pad) * h;
-    let n = [
-        ((ext.x / h).ceil() as usize + 2 * pad as usize + 1).max(1),
-        ((ext.y / h).ceil() as usize + 2 * pad as usize + 1).max(1),
-        ((ext.z / h).ceil() as usize + 2 * pad as usize + 1).max(1),
-    ];
+    let axis = |len: f64| -> usize { ((len / h).ceil() as usize + 2 * pad as usize + 1).clamp(1, res + 8) };
+    let n = [axis(ext.x), axis(ext.y), axis(ext.z)];
     let mut g = Grid { n, origin, h, cell: vec![0u8; n[0] * n[1] * n[2]] };
     // Surface: sample each triangle densely enough to hit every voxel it crosses.
     for t in tris {
+        if t.iter().any(|&i| i as usize >= pos.len()) {
+            continue;
+        }
         let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+        if [a, b, c].iter().any(|p| !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite()) {
+            continue;
+        }
         let lmax = (b - a).len().max((c - a).len()).max((c - b).len());
-        let k = ((lmax / (h * 0.5)).ceil() as usize).max(1);
+        if !lmax.is_finite() {
+            continue;
+        }
+        let k = ((lmax / (h * 0.5)).ceil() as usize).clamp(1, res * 4);
         for i in 0..=k {
             for j in 0..=(k - i) {
                 let (u, v) = (i as f64 / k as f64, j as f64 / k as f64);
@@ -1582,5 +1600,16 @@ mod tests {
             }
         }
         assert!(reachable >= 8);
+    }
+
+    #[test]
+    fn voxelize_empty_and_non_finite_mesh_does_not_panic() {
+        let (g, solid, _, _) = voxelize_internal(&[], &[], 16, None, false);
+        assert!(g.n[0] >= 1 && g.n[1] >= 1 && g.n[2] >= 1);
+        assert_eq!(solid.openings, 0);
+
+        let bad_pos = [v3(f64::NAN, 0.0, 0.0), v3(1e308, -1e308, 0.0)];
+        let (g2, _, _, _) = voxelize_internal(&bad_pos, &[[0, 1, 99]], 32, None, false);
+        assert!(g2.n[0] >= 1 && g2.h.is_finite());
     }
 }

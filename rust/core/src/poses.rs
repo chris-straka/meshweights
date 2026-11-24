@@ -100,7 +100,35 @@ impl SkelClass {
 }
 
 pub fn parse_pose_set(text: &str) -> Result<PoseSet, String> {
-    ron::from_str(text).map_err(|e| format!("pose set: {e}"))
+    let set: PoseSet = ron::from_str(text).map_err(|e| format!("pose set: {e}"))?;
+    if set.poses.is_empty() {
+        return Err("pose set has no poses".into());
+    }
+    if let Some(f) = &set.frame {
+        let vals = [f.up.0, f.up.1, f.up.2, f.forward.0, f.forward.1, f.forward.2];
+        if vals.iter().any(|x| !x.is_finite()) {
+            return Err("pose set frame has a non-finite axis component".into());
+        }
+        let up = v3(f.up.0, f.up.1, f.up.2);
+        let fwd = v3(f.forward.0, f.forward.1, f.forward.2);
+        if up.len() <= 1e-9 || fwd.len() <= 1e-9 {
+            return Err("pose set frame up/forward axis must be non-zero".into());
+        }
+        if up.normalized().cross(fwd.normalized()).len() <= 1e-6 {
+            return Err("pose set frame up and forward axes must not be parallel".into());
+        }
+    }
+    for p in &set.poses {
+        for m in &p.moves {
+            let angle = match m.motion {
+                Motion::Bend(_, a) | Motion::Twist(a) => a,
+            };
+            if !angle.is_finite() {
+                return Err(format!("pose '{}': angle is not finite ({angle})", p.name));
+            }
+        }
+    }
+    Ok(set)
 }
 
 // ---------------------------------------------------------------- roles
@@ -274,9 +302,11 @@ pub fn name_roles(sk: &Skeleton) -> BTreeMap<String, Vec<usize>> {
         && !sp.is_empty()
     {
         roles.insert("hips".into(), vec![sp[0]]);
-        if sp.len() > 1 {
+        if sp.len() > 1
+            && let Some(&chest) = sp.last()
+        {
             roles.insert("spine*".into(), sp[1..].to_vec());
-            roles.insert("chest".into(), vec![*sp.last().unwrap()]);
+            roles.insert("chest".into(), vec![chest]);
         }
     }
     roles
@@ -764,5 +794,23 @@ mod tests {
         let m = Model::from_glb(g).unwrap();
         assert!(clip_poses(&m, 4).is_empty());
         assert!(clip_frames(&m, -1.0).is_empty());
+    }
+
+    #[test]
+    fn parse_pose_set_rejects_empty_and_invalid_frames_or_angles() {
+        assert!(parse_pose_set(r#"PoseSet(name: "empty", poses: [])"#).is_err());
+        assert!(
+            parse_pose_set(
+                r#"PoseSet(name: "zero_frame", frame: Some((up: (0.0, 0.0, 0.0), forward: (0.0, 0.0, 1.0))), poses: [(name: "p", moves: [(bone: "head", motion: Twist(10.0))])])"#,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_pose_set(
+                r#"PoseSet(name: "collinear", frame: Some((up: (0.0, 1.0, 0.0), forward: (0.0, 2.0, 0.0))), poses: [(name: "p", moves: [(bone: "head", motion: Twist(10.0))])])"#,
+            )
+            .is_err()
+        );
+        assert!(parse_pose_set(r#"PoseSet(name: "nan_ang", poses: [(name: "p", moves: [(bone: "head", motion: Twist(NaN))])])"#).is_err());
     }
 }

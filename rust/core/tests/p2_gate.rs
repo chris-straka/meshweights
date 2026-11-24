@@ -103,11 +103,12 @@ fn output_is_rig_contract_clean_and_only_weights_change() {
 }
 
 fn rfcheck() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let p = std::path::PathBuf::from(home).join("Games/_blender/rfcheck/target/release/rfcheck");
-    p.exists()
-        .then_some(p)
-        .or_else(|| std::process::Command::new("rfcheck").arg("--help").output().ok().map(|_| std::path::PathBuf::from("rfcheck")))
+    if let Some(p) = std::env::var_os("RFCHECK_BIN").filter(|s| !s.is_empty()).map(std::path::PathBuf::from)
+        && p.exists()
+    {
+        return Some(p);
+    }
+    std::process::Command::new("rfcheck").arg("--help").output().ok().map(|_| std::path::PathBuf::from("rfcheck"))
 }
 
 #[test]

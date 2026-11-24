@@ -145,8 +145,9 @@ pub fn bone_label(model: &Model, j: usize) -> String {
     if let Some((r, _)) = roles.iter().filter(|(r, _)| !r.ends_with('*') && !r.starts_with("fingers")).find(|(_, js)| js.contains(&j)) {
         return pretty(r);
     }
-    if let Some(sp) = roles.get("spine*").filter(|js| js.contains(&j)) {
-        let i = sp.iter().position(|&x| x == j).unwrap();
+    if let Some(sp) = roles.get("spine*")
+        && let Some(i) = sp.iter().position(|&x| x == j)
+    {
         return if i + 1 == sp.len() {
             "chest".into()
         } else if i == 0 {
@@ -273,7 +274,7 @@ fn top_eigenvector(m: [[f64; 4]; 4]) -> [f64; 4] {
             }
         }
     }
-    let best = (0..4).max_by(|&x, &y| a[x][x].total_cmp(&a[y][y])).unwrap();
+    let best = (0..4).max_by(|&x, &y| a[x][x].total_cmp(&a[y][y])).unwrap_or(0);
     [v[0][best], v[1][best], v[2][best], v[3][best]]
 }
 
@@ -738,8 +739,10 @@ pub fn assess(
     // Wrong bone: areas per (region bone, foreign bone).
     let mut by: BTreeMap<(usize, u32), Vec<u32>> = BTreeMap::new();
     for v in 0..nv {
-        if wrong[v].0 > 0.0 {
-            by.entry((vbone[v], foreign[v].as_ref().unwrap().1)).or_default().push(v as u32);
+        if wrong[v].0 > 0.0
+            && let Some((_, fb)) = foreign[v]
+        {
+            by.entry((vbone[v], fb)).or_default().push(v as u32);
         }
     }
     for ((rb, fb), vs) in by {
@@ -1009,7 +1012,7 @@ pub fn guard(model: &Model, groups: &[(&Ctx, bool)], input: &Weights, output: &W
         return if worse_whole(&aout) { everything() } else { (cur, Vec::new()) };
     }
     // Of the two that are no worse than the input as a whole, the one
-    // tearing less in all stands (round 3, Pum cut: putting back two
+    // tearing less in all stands (round 3, split-legs asset: putting back two
     // regions that got worse on one group took the clips from 0.33 to
     // 0.74 %).
     let acur = per_region(&cur);

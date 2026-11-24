@@ -475,11 +475,13 @@ pub fn analyze(sk: &Skeleton, rest: &[Vec3], weights: &Weights) -> Anatomy {
             };
             if let Some(nk) = off(ch).into_iter().filter(|&c| reach(c, fwd) > 0.05 * h).max_by_key(|&c| (t.sub[c], c)) {
                 let chain = main_chain(&t, nk);
-                let head = *chain.iter().max_by_key(|&&j| (t.mass[j], j)).unwrap();
-                let hi = chain.iter().position(|&j| j == head).unwrap();
-                put(&mut a, "neck".into(), chain[..hi].to_vec());
-                put(&mut a, "head".into(), vec![head]);
-                set_group(&mut a, nk, Group::Head);
+                if let Some(&head) = chain.iter().max_by_key(|&&j| (t.mass[j], j))
+                    && let Some(hi) = chain.iter().position(|&j| j == head)
+                {
+                    put(&mut a, "neck".into(), chain[..hi].to_vec());
+                    put(&mut a, "head".into(), vec![head]);
+                    set_group(&mut a, nk, Group::Head);
+                }
             }
             if let Some(tl) = off(hp).into_iter().filter(|&c| reach(c, -fwd) > 0.05 * h).max_by_key(|&c| (t.sub[c], c)) {
                 put(&mut a, "tail*".into(), main_chain(&t, tl));
@@ -631,8 +633,9 @@ fn humanoid(
     a.roles.insert("chest".into(), vec![path[chest_i]]);
     // Head: the joint above the chest owning the most vertices.
     let above: Vec<usize> = path[chest_i + 1..].to_vec();
-    if let Some(&head) = above.iter().max_by_key(|&&j| (t.mass[j], std::cmp::Reverse(j))) {
-        let hi = above.iter().position(|&j| j == head).unwrap();
+    if let Some(&head) = above.iter().max_by_key(|&&j| (t.mass[j], std::cmp::Reverse(j)))
+        && let Some(hi) = above.iter().position(|&j| j == head)
+    {
         if hi > 0 {
             a.roles.insert("neck".into(), above[..hi].to_vec());
         }
@@ -642,20 +645,13 @@ fn humanoid(
         }
     }
     for (root, _, _) in [al, ar] {
-        let side = if t
-            .head(
-                *t.descendants(root)
-                    .iter()
-                    .max_by(|&&x, &&y| (t.head(x).dot(left) - mid).abs().total_cmp(&(t.head(y).dot(left) - mid).abs()))
-                    .unwrap(),
-            )
-            .dot(left)
-            >= mid
-        {
-            "L"
-        } else {
-            "R"
-        };
+        let side_j = t
+            .descendants(root)
+            .iter()
+            .copied()
+            .max_by(|&x, &y| (t.head(x).dot(left) - mid).abs().total_cmp(&(t.head(y).dot(left) - mid).abs()))
+            .unwrap_or(root);
+        let side = if t.head(side_j).dot(left) >= mid { "L" } else { "R" };
         arm_roles(a, t, root, side, left, mid, h);
         for j in t.all_desc(root) {
             a.group[j] = Group::Limb(format!("arm.{side}"));
@@ -667,11 +663,12 @@ fn humanoid(
 fn arm_roles(a: &mut Anatomy, t: &Tree, root: usize, side: &str, left: Vec3, mid: f64, h: f64) {
     // The arm's chain: from its root to the joint reaching farthest (a
     // fingertip, or the hand of a mitten).
-    let far = *t
+    let far = t
         .descendants(root)
         .iter()
-        .max_by(|&&x, &&y| (t.head(x) - t.head(root)).len().total_cmp(&(t.head(y) - t.head(root)).len()).then(y.cmp(&x)))
-        .unwrap();
+        .copied()
+        .max_by(|&x, &y| (t.head(x) - t.head(root)).len().total_cmp(&(t.head(y) - t.head(root)).len()).then(y.cmp(&x)))
+        .unwrap_or(root);
     let mut p = t.path_up(far, root);
     p.push(root);
     p.reverse();
@@ -682,7 +679,8 @@ fn arm_roles(a: &mut Anatomy, t: &Tree, root: usize, side: &str, left: Vec3, mid
     let s: Vec<f64> = {
         let mut acc = vec![0.0];
         for w in p.windows(2) {
-            acc.push(acc.last().unwrap() + (t.head(w[1]) - t.head(w[0])).len());
+            let prev = acc.last().copied().unwrap_or(0.0);
+            acc.push(prev + (t.head(w[1]) - t.head(w[0])).len());
         }
         acc
     };

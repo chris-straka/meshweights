@@ -40,12 +40,16 @@ impl Glb {
         Ok(Glb { json_raw: Some((c.json.to_vec(), json.clone())), json, bin: c.bin.to_vec() })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>> {
         let js = match &self.json_raw {
             Some((raw, parsed)) if *parsed == self.json => raw.clone(),
-            _ => serde_json::to_vec(&self.json).expect("json"),
+            _ => serde_json::to_vec(&self.json).map_err(|e| Error(format!("GLB JSON encode: {e}")))?,
         };
-        glbkit::container::write(&js, &self.bin).expect("GLB under 4 GiB")
+        glbkit::container::write(&js, &self.bin).map_err(|e| Error(format!("GLB container encode: {e}")))
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.try_to_bytes().expect("GLB under 4 GiB")
     }
 
     pub fn arr(&self, key: &str) -> &[Value] {
@@ -121,7 +125,15 @@ impl Glb {
         if n != 1 {
             return err(format!("index accessor {idx} is not SCALAR"));
         }
-        Ok(v.into_iter().map(|x| x as u32).collect())
+        v.into_iter()
+            .map(|x| {
+                if !x.is_finite() || x < 0.0 || x > u32::MAX as f64 {
+                    err(format!("index accessor {idx} has invalid index {x}"))
+                } else {
+                    Ok(x as u32)
+                }
+            })
+            .collect()
     }
 
     /// Overwrites skinning data of a VEC4 JOINTS/WEIGHTS accessor in place.
@@ -295,5 +307,19 @@ mod tests {
         let g =
             Glb { json: json!({"accessors": [{"componentType": 5126, "count": u64::MAX, "type": "MAT4"}]}), bin: vec![], json_raw: None };
         assert!(g.read_f64(0).is_err());
+    }
+
+    #[test]
+    fn read_indices_rejects_negative_or_non_finite() {
+        let mut g = Glb { json: json!({"buffers": [{}], "bufferViews": [], "accessors": []}), bin: vec![], json_raw: None };
+        let bad_neg = f32_bytes(&[-1.0, 0.0, 1.0]);
+        let bv1 = g.append_view(&bad_neg, None).unwrap();
+        let a1 = g.push_accessor(json!({"bufferView": bv1, "componentType": 5126, "count": 3, "type": "SCALAR"})).unwrap();
+        assert!(g.read_indices(a1).is_err());
+
+        let bad_nan = f32_bytes(&[f32::NAN, 0.0, 1.0]);
+        let bv2 = g.append_view(&bad_nan, None).unwrap();
+        let a2 = g.push_accessor(json!({"bufferView": bv2, "componentType": 5126, "count": 3, "type": "SCALAR"})).unwrap();
+        assert!(g.read_indices(a2).is_err());
     }
 }

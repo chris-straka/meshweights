@@ -79,7 +79,7 @@ pub struct FixOpts<'a> {
 impl Default for FixOpts<'_> {
     fn default() -> Self {
         FixOpts {
-            methods: Method::parse("auto").unwrap(),
+            methods: vec![Method::Smooth, Method::Geodesic, Method::Transfer, Method::Optimize],
             source: None,
             external: Vec::new(),
             all_regions: false,
@@ -549,7 +549,9 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                 best = Some((c, wt, r));
             }
         }
-        let (c, w, r) = best.unwrap();
+        let Some((c, w, r)) = best else {
+            return (from.to_vec(), model.weights.clone(), real(&model.weights, p.gate_first), plans.first().is_some_and(|x| x.exact));
+        };
         (c, w, r, plans[0].exact)
     };
     // A candidate is measured only if, applied to the whole repair area, it
@@ -755,7 +757,9 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                     best = Some((key, trial, wt));
                 }
             }
-            let (key, trial, wt) = best.unwrap();
+            let Some((key, trial, wt)) = best else {
+                break;
+            };
             if debug {
                 eprintln!("drop: {} regions gain a failing finding, energy {:.4}", key.0, key.1);
             }

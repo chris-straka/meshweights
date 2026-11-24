@@ -185,7 +185,9 @@ impl<'a> Slicer<'a> {
     /// and the triangles it crosses, and whether it closes. Marks its
     /// triangles seen under the current stamp.
     fn walk(&mut self, t0: u32, y: f64) -> (Vec<(f64, f64)>, Vec<u32>, bool) {
-        let ends = self.crossing(t0, y).expect("a crossing triangle");
+        let Some(ends) = self.crossing(t0, y) else {
+            return (Vec::new(), Vec::new(), false);
+        };
         self.seen[t0 as usize] = self.stamp;
         let mut pts: Vec<(f64, f64)> = Vec::new();
         let mut tris: Vec<u32> = vec![t0];
@@ -209,7 +211,9 @@ impl<'a> Slicer<'a> {
                 };
                 self.seen[n as usize] = self.stamp;
                 run_t.push(n);
-                let c = self.crossing(n, y).unwrap();
+                let Some(c) = self.crossing(n, y) else {
+                    break;
+                };
                 e = if c[0] == e { c[1] } else { c[0] };
                 cur = n;
             }
@@ -779,7 +783,9 @@ pub fn sleeve_labels(model: &Model, arm: &Arm, w: &Weights, by_weights: bool) ->
                 }
             }
             let thick = |k: i64| span.get(&k).map_or(0.0, |e| e.1 - e.0);
-            let far = *span.keys().next_back().unwrap();
+            let Some(&far) = span.keys().next_back() else {
+                return 1;
+            };
             if (far as f64) * width < 0.9 * arm.len {
                 return 1; // the arm alone
             }

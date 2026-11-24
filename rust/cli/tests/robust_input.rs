@@ -257,3 +257,80 @@ fn fix_and_dump_report_unwritable_outputs() {
     assert!(!o.hung && o.code == Some(2), "dump into a missing folder: {:?}\n{}", o.code, o.stderr);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn malformed_empty_and_invalid_threshold_errors_exit_2() {
+    let d = tmp("malformed_cli");
+    let ds = d.to_str().unwrap();
+
+    // 1. Truncated/corrupt GLB
+    let corrupt = d.join("corrupt.glb");
+    std::fs::write(&corrupt, b"glTF\x02\x00\x00\x00\xff\x00\x00\x00bad").unwrap();
+    let o = run(&["check", corrupt.to_str().unwrap()]);
+    assert!(!o.hung && !o.stderr.contains("panicked") && o.code == Some(2), "corrupt glb: {:?}\n{}", o.code, o.stderr);
+    assert!(o.stderr.contains("GLB"), "corrupt glb error lacked context:\n{}", o.stderr);
+
+    // 2. Empty mesh / missing skin bones GLB
+    let make_glb = |json_val: serde_json::Value, path: &Path| {
+        let mut js = serde_json::to_vec(&json_val).unwrap();
+        while !js.len().is_multiple_of(4) {
+            js.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(12 + 8 + js.len() as u32 + 8).to_le_bytes());
+        out.extend_from_slice(&(js.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+        out.extend_from_slice(&js);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+        std::fs::write(path, out).unwrap();
+    };
+
+    let no_skin = d.join("no_skin.glb");
+    make_glb(serde_json::json!({"asset": {"version": "2.0"}, "nodes": [], "meshes": [], "skins": []}), &no_skin);
+    let o = run(&["check", no_skin.to_str().unwrap()]);
+    assert!(!o.hung && !o.stderr.contains("panicked") && o.code == Some(2), "no skin glb: {:?}\n{}", o.code, o.stderr);
+    assert!(o.stderr.contains("skin"), "no skin glb error lacked context:\n{}", o.stderr);
+
+    let empty_mesh = d.join("empty_mesh.glb");
+    make_glb(
+        serde_json::json!({
+            "asset": {"version": "2.0"},
+            "nodes": [{"name": "root"}, {"mesh": 0, "skin": 0}],
+            "skins": [{"joints": [0]}],
+            "meshes": [{"name": "Empty", "primitives": []}]
+        }),
+        &empty_mesh,
+    );
+    let o = run(&["check", empty_mesh.to_str().unwrap()]);
+    assert!(!o.hung && !o.stderr.contains("panicked") && o.code == Some(2), "empty mesh glb: {:?}\n{}", o.code, o.stderr);
+    assert!(o.stderr.contains("skinned primitives"), "empty mesh error lacked context:\n{}", o.stderr);
+
+    // 3. Invalid CLI thresholds & invalid pose set RON
+    let clean = fixture(&d, "clean");
+    let cs = clean.to_str().unwrap();
+    let bad_pose_ron = d.join("empty_poses.ron");
+    std::fs::write(&bad_pose_ron, r#"PoseSet(name: "empty", poses: [])"#).unwrap();
+    let out_dir = d.join("out_dir");
+    let out_file = d.join("out.png");
+
+    for args in [
+        vec!["check", cs, "--voxels", "0"],
+        vec!["check", cs, "--voxels", "2048"],
+        vec!["check", cs, "--poses", bad_pose_ron.to_str().unwrap()],
+        vec!["sheet", cs, "--out", out_file.to_str().unwrap(), "--cols", "0"],
+        vec!["sheet", cs, "--out", out_file.to_str().unwrap(), "--cols", "9"],
+        vec!["show", cs, "--out", out_dir.to_str().unwrap(), "--top", "0"],
+        vec!["show", cs, "--out", out_dir.to_str().unwrap(), "--kind", " , "],
+        vec!["compare", cs, cs, "--out", out_file.to_str().unwrap(), "--zoom", "--rows", "13"],
+        vec!["blind", cs, cs, "--out", ds, "--camera", "orthographic"],
+        vec!["blind", cs, cs, "--out", ds, "--seed", "not_a_seed"],
+    ] {
+        let o = run(&args);
+        assert!(!o.hung && !o.stderr.contains("panicked") && o.code == Some(2), "{args:?}: {:?}\n{}", o.code, o.stderr);
+    }
+
+    let _ = std::fs::remove_dir_all(&d);
+}

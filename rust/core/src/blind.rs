@@ -41,8 +41,8 @@ use std::collections::BTreeMap;
 
 /// The game's follow camera, read from a `metrics.ron` camera config
 /// (`distance` behind the focus point in metres, vertical `fov` in
-/// degrees). Supplied via `--metrics <path>` or `METRICS_FILE` /
-/// `HLH_METRICS` (no hardcoded game checkout path fallback).
+/// degrees). Supplied via `--metrics <path>` or `METRICS_FILE`
+/// (no hardcoded game checkout path fallback).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GameCamera {
     pub distance_m: f64,
@@ -66,16 +66,9 @@ pub fn parse_game_camera(text: &str) -> Result<GameCamera, String> {
     Ok(GameCamera { distance_m, fov_deg })
 }
 
-/// Explicit metrics.ron path from `METRICS_FILE` or `HLH_METRICS`, if set.
+/// Explicit metrics.ron path from `METRICS_FILE`, if set.
 pub fn game_metrics_path() -> Option<std::path::PathBuf> {
-    for key in ["METRICS_FILE", "HLH_METRICS"] {
-        if let Some(p) = std::env::var_os(key)
-            && !p.is_empty()
-        {
-            return Some(p.into());
-        }
-    }
-    None
+    std::env::var_os("METRICS_FILE").filter(|p| !p.is_empty()).map(Into::into)
 }
 
 /// Reads the follow camera from an explicit `metrics.ron` file.
@@ -84,10 +77,9 @@ pub fn game_camera_from_path(path: &std::path::Path) -> Result<GameCamera, Strin
     parse_game_camera(&text)
 }
 
-/// The game's follow camera from `METRICS_FILE` or `HLH_METRICS`.
+/// The game's follow camera from `METRICS_FILE`.
 pub fn game_camera() -> Result<GameCamera, String> {
-    let p = game_metrics_path()
-        .ok_or_else(|| "the game's camera: pass --metrics <metrics.ron> (or set METRICS_FILE / HLH_METRICS)".to_string())?;
+    let p = game_metrics_path().ok_or_else(|| "the game's camera: pass --metrics <metrics.ron> (or set METRICS_FILE)".to_string())?;
     game_camera_from_path(&p)
 }
 
@@ -108,13 +100,13 @@ pub fn game_frame_share() -> Result<f64, String> {
     game_camera().map(frame_share)
 }
 
-/// The game's talk camera, the close shot (HLH `talk::frame`, `Shot::Close`):
+/// The game's talk camera, the close shot (`talk::frame`, `Shot::Close`):
 /// the eye about 1.3 m from the speaker's face (three quarters of a
 /// 1.73 m talk distance, at most 1.3 m), level with it, aimed 0.1 m under
 /// it, through a 38 degree lens, 24 degrees off the line between the two.
 pub const TALK_CAM_DISTANCE_M: f64 = 1.3;
 pub const TALK_CAM_FOV_DEG: f64 = 38.0;
-/// The face's height as a share of the body's (HLH `talk::FACE`).
+/// The face's height as a share of the body's (`talk::FACE`).
 pub const TALK_FACE_SHARE: f64 = 0.915;
 /// The talk camera aims this far under the face, metres (1.75 m body).
 pub const TALK_AIM_BELOW_M: f64 = 0.1;
@@ -140,9 +132,9 @@ pub fn talk_frame_span() -> (f64, f64) {
 /// Which camera a blind run draws from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Camera {
-    /// HLH's follow camera: the whole body, about 38% of the frame.
+    /// The game follow camera: the whole body, about 38% of the frame.
     Follow,
-    /// HLH's talk camera, the close shot: head, shoulders and chest.
+    /// The game talk camera, the close shot: head, shoulders and chest.
     Talk,
 }
 

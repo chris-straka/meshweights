@@ -378,7 +378,7 @@ impl Skeleton {
                         None => Vec3::ZERO,
                     };
                     let key = |c: usize| d(c).dot(dir) + 1e-3 * d(c).len();
-                    ch.iter().copied().max_by(|&a, &b| key(a).total_cmp(&key(b)).then(b.cmp(&a))).unwrap()
+                    ch.iter().copied().max_by(|&a, &b| key(a).total_cmp(&key(b)).then(b.cmp(&a))).unwrap_or(ch[0])
                 }
             };
             tails[j] = self.head[pick];
@@ -517,7 +517,12 @@ impl Skeleton {
                 }
                 if seen.contains(&next) {
                     if next == r {
-                        let worst = *seen.iter().max_by(|&&a, &&b| link[a].unwrap().1.total_cmp(&link[b].unwrap().1)).unwrap();
+                        let worst = *seen
+                            .iter()
+                            .max_by(|&&a, &&b| {
+                                link[a].map_or(f64::NEG_INFINITY, |x| x.1).total_cmp(&link[b].map_or(f64::NEG_INFINITY, |x| x.1))
+                            })
+                            .unwrap_or(&r);
                         link[worst] = None;
                     }
                     break;
@@ -589,7 +594,9 @@ impl Skeleton {
         };
         join(main, &mut in_tree, &mut best, &pending);
         while !pending.is_empty() {
-            let (li, &r) = pending.iter().enumerate().min_by(|a, b| best[*a.1].0.total_cmp(&best[*b.1].0).then(a.1.cmp(b.1))).unwrap();
+            let Some((li, &r)) = pending.iter().enumerate().min_by(|a, b| best[*a.1].0.total_cmp(&best[*b.1].0).then(a.1.cmp(b.1))) else {
+                break;
+            };
             pending.swap_remove(li);
             links.push((r, best[r].1));
             join(r, &mut in_tree, &mut best, &pending);
@@ -905,13 +912,17 @@ impl Model {
                     }
                     for v in 0..pos.len() {
                         for c in 0..4 {
-                            let j = jv[v * 4 + c] as u32;
+                            let j_raw = jv[v * 4 + c];
                             let w = wv[v * 4 + c];
-                            if w > 0.0 && (j as usize) < snj {
-                                raw_w[v].push((j, w));
-                            } else if w > 0.0 {
-                                raw_bad[v] = true;
-                                bad_joint_max = bad_joint_max.max(j);
+                            if w > 0.0 {
+                                if j_raw.is_finite() && j_raw >= 0.0 && (j_raw as u64) < snj as u64 {
+                                    raw_w[v].push((j_raw as u32, w));
+                                } else {
+                                    raw_bad[v] = true;
+                                    if j_raw.is_finite() && j_raw >= 0.0 {
+                                        bad_joint_max = bad_joint_max.max((j_raw as u64).min(u32::MAX as u64) as u32);
+                                    }
+                                }
                             }
                         }
                     }
@@ -921,10 +932,19 @@ impl Model {
                         vw.push((j, 1.0));
                     }
                 }
+                let weld_step = if pos.iter().any(|p3| p3.iter().any(|&c| (c as f64 / step).abs() > 1e15)) {
+                    let peak = pos.iter().flat_map(|p3| p3.iter()).map(|&c| (c as f64).abs()).fold(0.0, f64::max);
+                    (peak * 1e-6).max(step)
+                } else {
+                    step
+                };
                 let mut raw_to_weld = Vec::with_capacity(pos.len());
                 for (v, p3) in pos.iter().enumerate() {
-                    let key =
-                        ((p3[0] as f64 / step).round() as i64, (p3[1] as f64 / step).round() as i64, (p3[2] as f64 / step).round() as i64);
+                    let key = (
+                        (p3[0] as f64 / weld_step).round() as i64,
+                        (p3[1] as f64 / weld_step).round() as i64,
+                        (p3[2] as f64 / weld_step).round() as i64,
+                    );
                     let id = *weld.entry(key).or_insert_with(|| {
                         bind.push(Vec3::from_f32(*p3));
                         rest.push(Vec3::ZERO);
@@ -973,7 +993,7 @@ impl Model {
             .enumerate()
             .map(|(i, copies)| {
                 if copies.len() == 1 {
-                    return copies.into_iter().next().unwrap();
+                    return copies.into_iter().next().unwrap_or_default();
                 }
                 let differ = copies
                     .iter()
@@ -1022,6 +1042,9 @@ impl Model {
             hi = hi.max(*p);
         }
         let scale = (hi - lo).len().max(1e-9);
+        if !scale.is_finite() {
+            return err("mesh extent overflows finite f64");
+        }
         let (edges, adj) = build_edges(bind.len(), &tris);
         let bad_joints = (bad_joint.iter().filter(|&&b| b).count(), bad_joint_max);
         Ok(Model { glb, skel, skins, parts, prims, bind, rest, tris, vpart, rigid, weights, seam_split, edges, adj, scale, bad_joints })
@@ -1048,9 +1071,10 @@ impl Model {
             if out.last().is_none_or(|l| l.0 != part.name || l.1 != self.skel.nodes[part.node].name) {
                 out.push((part.name.clone(), self.skel.nodes[part.node].name.clone(), Vec::new(), Vec::new()));
             }
-            let last = out.last_mut().unwrap();
-            last.2.extend(pos);
-            last.3.extend(prim.raw_to_weld.iter().copied());
+            if let Some(last) = out.last_mut() {
+                last.2.extend(pos);
+                last.3.extend(prim.raw_to_weld.iter().copied());
+            }
         }
         out
     }
@@ -1068,6 +1092,9 @@ impl Model {
     /// in place when the storage allows, else as fresh accessors. Extra
     /// JOINTS_n/WEIGHTS_n sets are dropped (rfcheck allows one set).
     pub fn write_weights(&self, w: &Weights) -> Result<Glb> {
+        if w.len() != self.nverts() {
+            return err(format!("weight vector length {} does not match vertex count {}", w.len(), self.nverts()));
+        }
         let mut glb = Glb { json: self.glb.json.clone(), bin: self.glb.bin.clone(), json_raw: self.glb.json_raw.clone() };
         // Each skin's own joint numbering; a joint a skin's vertices now
         // need but the skin lacks is appended to it, with an inverse bind
@@ -1079,6 +1106,9 @@ impl Model {
             let Some(k) = prim.skin else { continue };
             for &wi in &prim.raw_to_weld {
                 for &(j, x) in &w[wi as usize] {
+                    if x > 0.0 && (j as usize) >= self.njoints() {
+                        return err(format!("weight joint index {j} out of range (njoints={})", self.njoints()));
+                    }
                     if x > 0.0 && !local[k].contains_key(&j) {
                         let l = local[k].len() as u32;
                         local[k].insert(j, l);
@@ -1092,7 +1122,10 @@ impl Model {
                 continue;
             }
             let info = &self.skins[k];
-            let s_ref = self.skel.rest_global[self.skel.joints[info.joints[0] as usize]] * info.ibm[0];
+            let Some(&first_j) = info.joints.first() else {
+                return err(format!("skin {} has no joints", info.index));
+            };
+            let s_ref = self.skel.rest_global[self.skel.joints[first_j as usize]] * info.ibm[0];
             let mut ibm: Vec<f32> = info.ibm.iter().flat_map(|m| m.to_cols_vec()).map(|x| x as f32).collect();
             for &j in add {
                 let m = self.skel.rest_global[self.skel.joints[j as usize]].inverse() * s_ref;
@@ -1269,5 +1302,17 @@ mod tests {
         assert_eq!(vw[0].0, 2);
         assert_eq!(vw[1].0, 0);
         assert_eq!(vw[2].0, 1);
+    }
+
+    #[test]
+    fn malformed_skin_or_invalid_weights_return_errors() {
+        let g = Glb { json: serde_json::json!({"nodes": [], "meshes": [], "skins": []}), bin: vec![], json_raw: None };
+        assert!(Model::from_glb(g).is_err());
+
+        let m = Model::from_glb(crate::fixtures::to_glb(&crate::fixtures::build("clean"))).unwrap();
+        assert!(m.write_weights(&Vec::new()).is_err());
+        let mut bad_w = m.weights.clone();
+        bad_w[0] = vec![(m.njoints() as u32 + 5, 1.0)];
+        assert!(m.write_weights(&bad_w).is_err());
     }
 }

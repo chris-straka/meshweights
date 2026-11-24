@@ -44,17 +44,30 @@ impl Image {
     pub fn text(&mut self, x: usize, y: usize, s: &str, scale: usize, c: [u8; 3]) {
         draw_text(&mut self.rgb, self.w, self.h, x, y, s, scale, c);
     }
-    pub fn png_bytes(&self) -> Vec<u8> {
+    pub fn try_png_bytes(&self) -> Result<Vec<u8>, String> {
+        if self.w == 0 || self.h == 0 {
+            return Err("cannot encode empty image as PNG".into());
+        }
+        let expected = self.w.checked_mul(self.h).and_then(|n| n.checked_mul(3)).ok_or("image dimensions overflow")?;
+        if self.rgb.len() != expected {
+            return Err(format!("image buffer size {} does not match {}x{}x3", self.rgb.len(), self.w, self.h));
+        }
+        let w = u32::try_from(self.w).map_err(|_| "image width exceeds u32::MAX".to_string())?;
+        let h = u32::try_from(self.h).map_err(|_| "image height exceeds u32::MAX".to_string())?;
         let mut out = Vec::new();
         {
-            let mut enc = png::Encoder::new(&mut out, self.w as u32, self.h as u32);
+            let mut enc = png::Encoder::new(&mut out, w, h);
             enc.set_color(png::ColorType::Rgb);
             enc.set_depth(png::BitDepth::Eight);
             enc.set_compression(png::Compression::Balanced);
-            let mut wr = enc.write_header().expect("png header");
-            wr.write_image_data(&self.rgb).expect("png data");
+            let mut wr = enc.write_header().map_err(|e| format!("png header: {e}"))?;
+            wr.write_image_data(&self.rgb).map_err(|e| format!("png data: {e}"))?;
         }
-        out
+        Ok(out)
+    }
+
+    pub fn png_bytes(&self) -> Vec<u8> {
+        self.try_png_bytes().expect("valid RGB image")
     }
 }
 
@@ -101,13 +114,18 @@ pub fn fit(view: &View, sets: &[&[Vec3]], cell_w: usize, cell_h: usize) -> Fit {
     for s in sets {
         for p in s.iter() {
             let q = view.to_cam(*p);
-            lo = lo.min(q);
-            hi = hi.max(q);
+            if q.x.is_finite() && q.y.is_finite() {
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
         }
+    }
+    if lo.x > hi.x {
+        return Fit { cx: 0.0, cy: 0.0, ppu: 1.0 };
     }
     let w = (hi.x - lo.x).max(1e-9);
     let h = (hi.y - lo.y).max(1e-9);
-    let ppu = 0.92 * (cell_w as f64 / w).min(cell_h as f64 / h);
+    let ppu = (0.92 * (cell_w.max(1) as f64 / w).min(cell_h.max(1) as f64 / h)).max(1e-6);
     Fit { cx: (lo.x + hi.x) * 0.5, cy: (lo.y + hi.y) * 0.5, ppu }
 }
 
@@ -319,6 +337,7 @@ pub struct SheetInfo<'a> {
 
 /// Range-of-motion sheet: rest + the worst poses, bad vertices in red.
 pub fn sheet(model: &Model, ctx: &Ctx, ev: &Eval, w: &Weights, info: &SheetInfo, o: &SheetOpts) -> Image {
+    let cols = o.cols.max(1);
     let pose_bad = masked_pose_bad(ev, info.mask);
     let poses = pick_poses(ctx, &pose_bad, o.max_poses);
     let mut cells: Vec<Option<usize>> = vec![None];
@@ -326,9 +345,9 @@ pub fn sheet(model: &Model, ctx: &Ctx, ev: &Eval, w: &Weights, info: &SheetInfo,
     let meshes: Vec<Vec<Vec3>> = cells.iter().map(|&p| posed(model, ctx, p, w)).collect();
     let refs: Vec<&[Vec3]> = meshes.iter().map(|m| m.as_slice()).collect();
     let f = fit(&o.view, &refs, o.cell_w, o.cell_h - LABEL);
-    let rows = cells.len().div_ceil(o.cols);
-    let mut img = Image::new(o.cols * o.cell_w, HEADER + rows * o.cell_h, BG);
-    let title_cols = (o.cols * o.cell_w).saturating_sub(32) / 18;
+    let rows = cells.len().div_ceil(cols);
+    let mut img = Image::new(cols * o.cell_w, HEADER + rows * o.cell_h, BG);
+    let title_cols = (cols * o.cell_w).saturating_sub(32) / 18;
     img.text(16, 14, &fit_text(&format!("WEIGHTFORGE  {}", info.title), title_cols), 3, FG);
     let (line, col) = verdict_line(info.score, info.pass, info.fails);
     img.text(16, 50, &line, 3, col);
@@ -338,7 +357,7 @@ pub fn sheet(model: &Model, ctx: &Ctx, ev: &Eval, w: &Weights, info: &SheetInfo,
     img.text(img.w.saturating_sub(text_width(legend2, 2) + 16), 68, legend2, 2, [250, 158, 46]);
     let base = base_colors(model);
     for (k, &p) in cells.iter().enumerate() {
-        let (cx, cy) = ((k % o.cols) * o.cell_w, HEADER + (k / o.cols) * o.cell_h);
+        let (cx, cy) = ((k % cols) * o.cell_w, HEADER + (k / cols) * o.cell_h);
         img.rect(cx + 2, cy + 2, o.cell_w - 4, o.cell_h - 4, [32, 35, 42]);
         let mut colors = base.clone();
         let (label, n) = match p {
@@ -552,8 +571,13 @@ fn frame(view: &View, rest: &[Vec3]) -> Frame {
     let (mut lo, mut hi) = (v3(f64::MAX, f64::MAX, 0.0), v3(f64::MIN, f64::MIN, 0.0));
     for p in rest {
         let q = view.to_cam(*p);
-        lo = lo.min(q);
-        hi = hi.max(q);
+        if q.x.is_finite() && q.y.is_finite() {
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
+    }
+    if lo.x > hi.x {
+        return Frame { cx: 0.0, y0: 0.0, h: 1.0 };
     }
     Frame { cx: (lo.x + hi.x) * 0.5, y0: lo.y, h: (hi.y - lo.y).max(1e-9) }
 }
@@ -561,6 +585,9 @@ fn frame(view: &View, rest: &[Vec3]) -> Frame {
 /// The 4th and 96th percentile of `v` (its whole range when short), so
 /// one stray vertex does not widen the crop.
 fn span(v: &mut [f64]) -> (f64, f64) {
+    if v.is_empty() {
+        return (0.0, 0.0);
+    }
     v.sort_by(|a, b| a.total_cmp(b));
     let cut = if v.len() >= 25 { v.len() / 25 } else { 0 };
     (v[cut], v[v.len() - 1 - cut])
@@ -1208,10 +1235,12 @@ pub fn finding_sheet(model: &Model, ctx: &Ctx, w: &Weights, f: &crate::owner::Fi
     let top = 96usize;
     let (iw, ih) = (side + 2 * pw + 40, top + ph + 44);
     let mut img = Image::new(iw, ih, BG);
-    let posed = lbs(model, &ctx.mats[f.worst_pose.min(ctx.mats.len().saturating_sub(1))], w);
+    let posed = if ctx.mats.is_empty() { model.rest.clone() } else { lbs(model, &ctx.mats[f.worst_pose.min(ctx.mats.len() - 1)], w) };
     let mut is_f = vec![false; model.nverts()];
     for &v in &f.vertices {
-        is_f[v as usize] = true;
+        if let Some(slot) = is_f.get_mut(v as usize) {
+            *slot = true;
+        }
     }
     let colors: Vec<[f64; 3]> = (0..model.nverts())
         .map(|v| {
@@ -1234,22 +1263,35 @@ pub fn finding_sheet(model: &Model, ctx: &Ctx, w: &Weights, f: &crate::owner::Fi
     let full = fit(&view, &[&posed], side, ph);
     draw_mesh(&mut img, 0, top, side, ph, &posed, &model.tris, &colors, &view, full);
     // The crop: the finding's extent, doubled, square-ish to the panel.
-    let pts: Vec<Vec3> = f.vertices.iter().map(|&v| view.to_cam(posed[v as usize])).collect();
+    let pts: Vec<Vec3> = f.vertices.iter().filter_map(|&v| posed.get(v as usize)).map(|p| view.to_cam(*p)).collect();
     let (mut lo, mut hi) = (v3(f64::MAX, f64::MAX, 0.0), v3(f64::MIN, f64::MIN, 0.0));
     for q in &pts {
         lo = lo.min(*q);
         hi = hi.max(*q);
     }
+    if lo.x > hi.x {
+        for p in &posed {
+            let q = view.to_cam(*p);
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
+        if lo.x > hi.x {
+            lo = Vec3::ZERO;
+            hi = Vec3::ZERO;
+        }
+    }
     let body_h = crate::owner::height(model);
-    let span = ((hi.x - lo.x).max(hi.y - lo.y) * 2.0).max(0.18 * body_h);
+    let span = ((hi.x - lo.x).max(hi.y - lo.y) * 2.0).max(0.18 * body_h).max(1e-6);
     let (cx, cy) = (0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y));
     let ppu = (pw as f64 / span).min(ph as f64 / span);
     let zoom = Fit { cx, cy, ppu };
     draw_mesh(&mut img, side + 20, top, pw, ph, &posed, &model.tris, &colors, &view, zoom);
     // The same crop at rest: rest positions moved so the finding's centre
     // sits where it does posed.
-    let rc = f.vertices.iter().fold(Vec3::ZERO, |s, &v| s + model.rest[v as usize]) / f.vertices.len().max(1) as f64;
-    let pc = f.vertices.iter().fold(Vec3::ZERO, |s, &v| s + posed[v as usize]) / f.vertices.len().max(1) as f64;
+    let rc_pts: Vec<Vec3> = f.vertices.iter().filter_map(|&v| model.rest.get(v as usize)).copied().collect();
+    let pc_pts: Vec<Vec3> = f.vertices.iter().filter_map(|&v| posed.get(v as usize)).copied().collect();
+    let rc = rc_pts.iter().fold(Vec3::ZERO, |s, &p| s + p) / rc_pts.len().max(1) as f64;
+    let pc = pc_pts.iter().fold(Vec3::ZERO, |s, &p| s + p) / pc_pts.len().max(1) as f64;
     let rest: Vec<Vec3> = model.rest.iter().map(|p| *p - rc + pc).collect();
     draw_mesh(&mut img, side + pw + 40, top, pw, ph, &rest, &model.tris, &colors, &view, zoom);
     // The crop's box on the whole body.
@@ -1283,7 +1325,10 @@ pub fn finding_sheet(model: &Model, ctx: &Ctx, w: &Weights, f: &crate::owner::Fi
 /// view shows the most pixels of the marked triangles' skin, over a
 /// small depth-tested raster.
 pub fn best_view(pos: &[Vec3], tris: &[[u32; 3]], marked: &[bool]) -> View {
-    let mark: Vec<bool> = tris.iter().map(|t| t.iter().any(|&i| marked[i as usize])).collect();
+    let mark: Vec<bool> = tris.iter().map(|t| t.iter().any(|&i| marked.get(i as usize).copied().unwrap_or(false))).collect();
+    if !mark.iter().any(|&m| m) {
+        return View::default();
+    }
     let mut best = (0usize, View::default());
     for pitch in [10.0, 40.0, -25.0] {
         for k in 0..12 {
@@ -1297,6 +1342,9 @@ pub fn best_view(pos: &[Vec3], tris: &[[u32; 3]], marked: &[bool]) -> View {
                         hi = hi.max(cam[i as usize]);
                     }
                 }
+            }
+            if lo.x > hi.x {
+                continue;
             }
             let n = 96usize;
             let span = (hi.x - lo.x).max(hi.y - lo.y).max(1e-9) * 2.0;
@@ -1365,11 +1413,17 @@ pub fn before_after_sheet(b: &BaSide, a: &BaSide, area: &[u32], area_after: &[u3
     let top = 96usize;
     let (iw, ih) = (side + 2 * pw + 40, top + ph + 44);
     let mut img = Image::new(iw, ih, BG);
-    let pose = |s: &BaSide| lbs(s.model, &s.ctx.mats[frame.min(s.ctx.mats.len().saturating_sub(1))], &s.model.weights);
+    let pose = |s: &BaSide| {
+        if s.ctx.mats.is_empty() {
+            s.model.rest.clone()
+        } else {
+            lbs(s.model, &s.ctx.mats[frame.min(s.ctx.mats.len() - 1)], &s.model.weights)
+        }
+    };
     let colors = |s: &BaSide| -> Vec<[f64; 3]> {
         (0..s.model.nverts())
             .map(|v| {
-                if s.marked[v] {
+                if s.marked.get(v).copied().unwrap_or(false) {
                     return BAD;
                 }
                 let c = s.paint.rgb[v];
@@ -1386,7 +1440,9 @@ pub fn before_after_sheet(b: &BaSide, a: &BaSide, area: &[u32], area_after: &[u3
     let (cb, ca) = (colors(b), colors(a));
     let mut in_area = vec![false; b.model.nverts()];
     for &v in area {
-        in_area[v as usize] = true;
+        if let Some(slot) = in_area.get_mut(v as usize) {
+            *slot = true;
+        }
     }
     let view = best_view(&pb, &b.model.tris, &in_area);
     let full = fit(&view, &[&pb], side, ph);
@@ -1394,14 +1450,26 @@ pub fn before_after_sheet(b: &BaSide, a: &BaSide, area: &[u32], area_after: &[u3
     let crop = |pos: &[Vec3], vs: &[u32]| -> (f64, f64, f64) {
         let (mut lo, mut hi) = (v3(f64::MAX, f64::MAX, 0.0), v3(f64::MIN, f64::MIN, 0.0));
         for &v in vs {
-            let q = view.to_cam(pos[v as usize]);
-            lo = lo.min(q);
-            hi = hi.max(q);
+            if let Some(p) = pos.get(v as usize) {
+                let q = view.to_cam(*p);
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
+        }
+        if lo.x > hi.x {
+            for p in pos {
+                let q = view.to_cam(*p);
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
+            if lo.x > hi.x {
+                return (0.0, 0.0, 0.0);
+            }
         }
         (0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y), (hi.x - lo.x).max(hi.y - lo.y))
     };
     let (bx, by, bspan) = crop(&pb, area);
-    let span = (bspan * 2.0).max(0.18 * crate::owner::height(b.model));
+    let span = (bspan * 2.0).max(0.18 * crate::owner::height(b.model)).max(1e-6);
     let ppu = (pw as f64 / span).min(ph as f64 / span);
     draw_mesh(&mut img, side + 20, top, pw, ph, &pb, &b.model.tris, &cb, &view, Fit { cx: bx, cy: by, ppu });
     // The after rig framed on the same place (its own vertices there), at
@@ -1464,5 +1532,42 @@ mod tests {
         assert_eq!(h, "MIXED: OURS SCORES 80.0 VS 44.9 BUT FAILS MORE");
         let (h, _) = zoom_headline(&info(61.0, 1.0, false, 2), &info(61.4, 1.0, false, 2), "A", "B", 9, 9);
         assert!(h.starts_with("ABOUT EVEN"), "{h}");
+    }
+
+    #[test]
+    fn empty_inputs_and_try_png_bytes_do_not_panic() {
+        assert!(Image::new(0, 10, BG).try_png_bytes().is_err());
+        let mut bad = Image::new(2, 2, BG);
+        bad.rgb.pop();
+        assert!(bad.try_png_bytes().is_err());
+
+        let f = fit(&View::default(), &[], 100, 100);
+        assert!(f.cx.is_finite() && f.cy.is_finite() && f.ppu > 0.0);
+        assert_eq!(span(&mut []), (0.0, 0.0));
+        let _ = best_view(&[], &[], &[]);
+
+        let m = Model::from_glb(crate::fixtures::to_glb(&crate::fixtures::build("clean"))).unwrap();
+        let mut ctx = Ctx::new(&m, &crate::metrics::CtxOpts::default());
+        ctx.poses.clear();
+        ctx.mats.clear();
+        let paint = crate::paint::read(&m);
+        let finding = crate::owner::Finding {
+            kind: "wrong_bone".into(),
+            code: "D_WRONG_BONE".into(),
+            severity: "fail".into(),
+            part: "arm.L".into(),
+            worst: "rest".into(),
+            worst_pose: 99,
+            verts: 0,
+            area_cm2: 0.0,
+            area_pct: 0.0,
+            detail: "test".into(),
+            vertices: vec![],
+        };
+        let img = finding_sheet(&m, &ctx, &m.weights, &finding, &paint, "empty");
+        assert!(img.try_png_bytes().is_ok());
+        let ba = BaSide { model: &m, ctx: &ctx, marked: &[], paint: &paint, label: "a".into() };
+        let img2 = before_after_sheet(&ba, &ba, &[], &[], 0, ["h0", "h1", "h2"], "empty ba");
+        assert!(img2.try_png_bytes().is_ok());
     }
 }

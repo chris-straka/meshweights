@@ -87,11 +87,25 @@ fn usage_errors_exit_2() {
     assert_eq!(run(&["check", "x.glb", "--voxels", "3"]).0, 2);
 }
 
+fn collect_rs_sources(dir: &std::path::Path, out: &mut String) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_rs_sources(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push_str(&std::fs::read_to_string(&path).unwrap());
+            out.push('\n');
+        }
+    }
+}
+
 #[test]
 fn help_lists_every_flag() {
     let (c, help, _) = run(&["--help"]);
     assert_eq!(c, 0);
-    let src = include_str!("../src/main.rs");
+    let mut src = String::new();
+    collect_rs_sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut src);
     let mut flags: Vec<&str> = src.split('"').filter(|s| s.starts_with("--") && s.len() > 2 && !s.contains(' ')).collect();
     flags.sort();
     flags.dedup();
@@ -344,18 +358,18 @@ sys.exit(2)
 }
 
 #[test]
-fn blind_follow_requires_explicit_metrics_without_hlh_fallback() {
+fn blind_follow_requires_explicit_metrics_without_home_fallback() {
     let d = tmp("blind_no_fallback");
     let ds = d.to_str().unwrap();
     assert_eq!(run(&["fixture", "all", "--out", ds]).0, 0);
     let a = d.join("mannequin_bleed.glb");
     let b = d.join("mannequin_cape_wrong_bone.glb");
-    // Even if $HOME contains Games/hlh/bevy/assets/data/metrics.ron, follow blind
-    // must refuse unless --metrics (or HLH_METRICS/METRICS_FILE) is explicitly provided.
+    // Even if $HOME contains an example metrics.ron path, follow blind must
+    // refuse unless --metrics (or METRICS_FILE) is explicitly provided.
     let fake_home = d.join("home");
-    let fake_hlh_metrics = fake_home.join("Games/hlh/bevy/assets/data/metrics.ron");
-    std::fs::create_dir_all(fake_hlh_metrics.parent().unwrap()).unwrap();
-    std::fs::write(&fake_hlh_metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
+    let fake_metrics = fake_home.join("game/assets/data/metrics.ron");
+    std::fs::create_dir_all(fake_metrics.parent().unwrap()).unwrap();
+    std::fs::write(&fake_metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
 
     let fake_gk = d.join("gk");
     std::fs::write(
@@ -370,7 +384,6 @@ fn blind_follow_requires_explicit_metrics_without_hlh_fallback() {
         .args(["blind", a.to_str().unwrap(), b.to_str().unwrap(), "--out", out_missing.to_str().unwrap(), "--top", "1"])
         .env("HOME", &fake_home)
         .env("GK_BIN", &fake_gk)
-        .env_remove("HLH_METRICS")
         .env_remove("METRICS_FILE")
         .output()
         .unwrap();
@@ -394,7 +407,6 @@ fn blind_follow_requires_explicit_metrics_without_hlh_fallback() {
         ])
         .env("HOME", &fake_home)
         .env("GK_BIN", &fake_gk)
-        .env_remove("HLH_METRICS")
         .env_remove("METRICS_FILE")
         .output()
         .unwrap();
