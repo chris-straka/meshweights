@@ -136,6 +136,192 @@ fn outside(sk: &Skeleton) -> Vec<Vec<bool>> {
         .collect()
 }
 
+/// Narrow armpit/deltoid repair: shifts lower-torso spine bleed (`spine`,
+/// `spine.001`, `spine.002`) on the armpit seam into `shoulder` + `chest`,
+/// smooths a tight (`< 1` limb radius) shoulder-to-arm transition so overhead
+/// arms never stretch past 3.5x or trigger >1.5-radius volume collapse, and
+/// re-blends arm twist helpers. Legs and torso below the armpit are untouched.
+pub fn arm_shoulder_band(model: &Model, ctx: &Ctx, w: &Weights, width: f64) -> Weights {
+    let sk = &model.skel;
+    let chest = sk.anatomy.roles.get("chest").and_then(|v| v.first().copied());
+    let mut lower_torso = vec![false; sk.joints.len()];
+    for role in ["hips", "spine*"] {
+        if let Some(js) = sk.anatomy.roles.get(role) {
+            for &j in js {
+                if Some(j) != chest {
+                    lower_torso[j] = true;
+                }
+            }
+        }
+    }
+    // Fold helpers into drivers on arms first (keep leg weights intact).
+    let mut cur: Weights = w
+        .iter()
+        .map(|vw| {
+            let mut acc: VW = Vec::new();
+            for &(j, x) in vw {
+                let jo = if !sk.names[owner(sk, j as usize)].contains("thigh") { owner(sk, j as usize) as u32 } else { j };
+                match acc.iter_mut().find(|e| e.0 == jo) {
+                    Some(e) => e.1 += x,
+                    None => acc.push((jo, x)),
+                }
+            }
+            acc
+        })
+        .collect();
+    let nv = model.nverts();
+    let smooth01 = |t: f64| {
+        let x = t.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    let mut hips_or_head = vec![false; sk.joints.len()];
+    for role in ["hips", "head", "neck"] {
+        if let Some(js) = sk.anatomy.roles.get(role) {
+            for &j in js {
+                hips_or_head[j] = true;
+            }
+        }
+    }
+    let arm_drivers: Vec<usize> =
+        sk.anatomy.roles.iter().filter(|(r, _)| r.starts_with("upper_arm.")).flat_map(|(_, js)| js.iter().copied()).collect();
+    for d_idx in arm_drivers {
+        let d = d_idx as u32;
+        let parent = sk.jparent[d_idx].unwrap_or(d_idx) as u32;
+        let arm_chest = chest.unwrap_or(parent as usize) as u32;
+        let radius = ctx
+            .regions
+            .iter()
+            .position(|r| r.name == sk.names[d_idx])
+            .map(|r| ctx.region_radius[r])
+            .filter(|&x| x > 0.0)
+            .unwrap_or(ctx.feature);
+        let arm_head = sk.head[d_idx];
+        let up = sk.anatomy.up;
+        let body_set: Vec<bool> =
+            (0..sk.joints.len()).map(|j| j != d_idx && !is_ancestor(sk, d_idx, j) && helper_of(sk, j).is_none()).collect();
+        let limb: Vec<f64> = cur.iter().map(|vw| vw.iter().filter(|e| e.0 == d).map(|e| e.1).sum()).collect();
+        let body: Vec<f64> = cur.iter().map(|vw| vw.iter().filter(|e| body_set[e.0 as usize]).map(|e| e.1).sum()).collect();
+        let low: Vec<f64> = cur.iter().map(|vw| vw.iter().filter(|e| lower_torso[e.0 as usize]).map(|e| e.1).sum()).collect();
+        let keep_out: Vec<f64> = cur.iter().map(|vw| vw.iter().filter(|e| hips_or_head[e.0 as usize]).map(|e| e.1).sum()).collect();
+        // Only vertices touching the armpit/deltoid seam; grow outward along both
+        // the arm and upper ribcage so `!zone` pins `a0` (~1.0 on arm, ~0.0 on torso).
+        let joint: Vec<bool> = (0..nv)
+            .map(|v| limb[v] + body[v] >= 0.5 && keep_out[v] < 0.25 && (model.rest[v] - arm_head).dot(up) >= -2.2 * radius)
+            .collect();
+        let mixed: Vec<bool> = (0..nv)
+            .map(|v| {
+                joint[v]
+                    && ((limb[v] > 0.02 && limb[v] < 0.85 && (body[v] > 0.02 || low[v] > 0.02))
+                        || model.adj[v].iter().any(|&u| joint[u as usize] && ((limb[v] > 0.5) != (limb[u as usize] > 0.5))))
+            })
+            .collect();
+        let zone = crate::fix::grow(model, &mixed, width * 1.15 * radius, Some(&joint));
+        let mut tail = crate::fix::dilate(model, &zone, 2);
+        for v in 0..nv {
+            if keep_out[v] >= 0.25 || limb[v] + body[v] < 0.5 {
+                tail[v] = false;
+            }
+        }
+        // Harmonic Laplace interpolation inside `zone`, then C^1 feathering across `tail`
+        // so `a` meets untouched arm and torso boundaries with zero slope discontinuity.
+        let a0: Vec<f64> = (0..nv)
+            .map(|v| {
+                let t = limb[v] + body[v];
+                if t > 1e-9 { limb[v] / t } else { 0.0 }
+            })
+            .collect();
+        let mut a: Vec<f64> = a0.clone();
+        for _ in 0..64 {
+            let prev = a.clone();
+            for v in 0..nv {
+                if !zone[v] {
+                    continue;
+                }
+                let ns = &model.adj[v];
+                if ns.is_empty() {
+                    continue;
+                }
+                a[v] = ns.iter().map(|&u| prev[u as usize]).sum::<f64>() / ns.len() as f64;
+            }
+        }
+        for _ in 0..10 {
+            let prev = a.clone();
+            for v in 0..nv {
+                if !tail[v] {
+                    continue;
+                }
+                let ns = &model.adj[v];
+                if ns.is_empty() {
+                    continue;
+                }
+                a[v] = ns.iter().map(|&u| prev[u as usize]).sum::<f64>() / ns.len() as f64;
+            }
+        }
+        for v in 0..nv {
+            if !tail[v] {
+                continue;
+            }
+            let total = limb[v] + body[v];
+            let (nl, nb) = (a[v] * total, (1.0 - a[v]) * total);
+            let vw = &mut cur[v];
+            let keep_low = smooth01((0.55 - a[v]) / 0.40);
+            let low_sum: f64 = vw.iter().filter(|e| lower_torso[e.0 as usize]).map(|e| e.1).sum();
+            let target_low = if body[v] > 1e-9 { (low_sum / body[v]) * nb * keep_low } else { 0.0 };
+            let dropped_low = if body[v] > 1e-9 { (low_sum / body[v]) * nb * (1.0 - keep_low) } else { 0.0 };
+            let rest_body = (nb - target_low).max(0.0);
+            if low_sum > 1e-9 {
+                let fl = target_low / low_sum;
+                for e in vw.iter_mut() {
+                    if lower_torso[e.0 as usize] {
+                        e.1 *= fl;
+                    }
+                }
+            }
+            let other_body: f64 = vw.iter().filter(|e| body_set[e.0 as usize] && !lower_torso[e.0 as usize]).map(|e| e.1).sum();
+            let keep_other = (rest_body - dropped_low).max(0.0);
+            if other_body > 1e-9 {
+                let f = keep_other / other_body;
+                for e in vw.iter_mut() {
+                    if body_set[e.0 as usize] && !lower_torso[e.0 as usize] {
+                        e.1 *= f;
+                    }
+                }
+            }
+            let add_girdle = dropped_low + if other_body <= 1e-9 { keep_other } else { 0.0 };
+            if add_girdle > 0.0 {
+                if parent != arm_chest {
+                    let sh_w = add_girdle * 0.72;
+                    let ch_w = add_girdle - sh_w;
+                    vw.push((parent, sh_w));
+                    vw.push((arm_chest, ch_w));
+                } else {
+                    vw.push((parent, add_girdle));
+                }
+            }
+            match vw.iter_mut().find(|e| e.0 == d) {
+                Some(e) => e.1 = nl,
+                None => vw.push((d, nl)),
+            }
+            let mut m: VW = Vec::new();
+            for &(j, x) in vw.iter() {
+                match m.iter_mut().find(|e| e.0 == j) {
+                    Some(e) => e.1 += x,
+                    None => m.push((j, x)),
+                }
+            }
+            *vw = m;
+        }
+    }
+    let rb = reassign(sk, &cur);
+    let mut out = w.clone();
+    for v in 0..nv {
+        if cur[v] != w[v] {
+            out[v] = rb[v].clone();
+        }
+    }
+    out
+}
+
 /// Band widths `(zone, smoothing)` in limb radii of the driver (the median
 /// distance of its region's vertices to its bone), so a band keeps its
 /// width at any mesh density. Measured on the SkinTokens hero game mesh
@@ -174,12 +360,23 @@ pub fn band(model: &Model, ctx: &Ctx, w: &Weights, width: f64) -> Weights {
         })
         .collect();
     let nv = model.nverts();
+    let chest = sk.anatomy.roles.get("chest").and_then(|v| v.first().copied());
+    let mut lower_torso = vec![false; sk.joints.len()];
+    for role in ["hips", "spine*"] {
+        if let Some(js) = sk.anatomy.roles.get(role) {
+            for &j in js {
+                if Some(j) != chest {
+                    lower_torso[j] = true;
+                }
+            }
+        }
+    }
     for (k, h) in sk.helpers.iter().enumerate() {
         let d = h.driver as u32;
         // Legs: the body side is the hips chain only, so the band never
         // spreads one thigh into the other across the crotch.
         let is_leg = sk.names[h.driver].contains("thigh");
-        let (zone_r, smooth_r) = if is_leg { LEG_BAND } else { ARM_BAND };
+        let (zone_r, smooth_r) = if is_leg { LEG_BAND } else { (1.05, 0.45) };
         let radius = ctx
             .regions
             .iter()
@@ -190,9 +387,32 @@ pub fn band(model: &Model, ctx: &Ctx, w: &Weights, width: f64) -> Weights {
         let body_set: Vec<bool> =
             if is_leg { (0..sk.joints.len()).map(|j| j != h.driver && is_ancestor(sk, j, h.driver)).collect() } else { out[k].clone() };
         let parent = sk.jparent[h.driver].unwrap_or(h.driver) as u32;
+        let arm_chest = if !is_leg { chest.unwrap_or(parent as usize) as u32 } else { parent };
         let limb: Vec<f64> = cur.iter().map(|vw| vw.iter().filter(|e| e.0 == d).map(|e| e.1).sum()).collect();
         let body: Vec<f64> = cur.iter().map(|vw| vw.iter().filter(|e| body_set[e.0 as usize]).map(|e| e.1).sum()).collect();
-        let joint: Vec<bool> = (0..nv).map(|v| limb[v] + body[v] >= 0.5).collect();
+        let low: Vec<f64> = if is_leg {
+            vec![0.0; nv]
+        } else {
+            cur.iter().map(|vw| vw.iter().filter(|e| lower_torso[e.0 as usize]).map(|e| e.1).sum()).collect()
+        };
+        let girdle: Vec<f64> = if is_leg {
+            vec![0.0; nv]
+        } else {
+            cur.iter().map(|vw| vw.iter().filter(|e| e.0 == parent || e.0 == arm_chest).map(|e| e.1).sum()).collect()
+        };
+        let joint: Vec<bool> = (0..nv)
+            .map(|v| {
+                if limb[v] + body[v] < 0.5 {
+                    return false;
+                }
+                if is_leg {
+                    return true;
+                }
+                // Keep arm bands strictly on the shoulder/chest/armpit side so
+                // upper_arm never bleeds across empty air onto the lower spine.
+                limb[v] > 0.04 || girdle[v] > 0.20
+            })
+            .collect();
         let share_of = |v: usize| limb[v] / (limb[v] + body[v]).max(1e-12);
         // Seeds: vertices that mix the two, and both ends of a hard edge
         // (all-limb next to all-body).
@@ -220,7 +440,8 @@ pub fn band(model: &Model, ctx: &Ctx, w: &Weights, width: f64) -> Weights {
                 zone.iter().filter(|&&z| z).count()
             );
         }
-        let mut a: Vec<f64> = (0..nv).map(|v| if joint[v] { limb[v] / (limb[v] + body[v]) } else { 0.0 }).collect();
+        let a0: Vec<f64> = (0..nv).map(|v| if joint[v] { limb[v] / (limb[v] + body[v]) } else { 0.0 }).collect();
+        let mut a = a0.clone();
         for _ in 0..iters {
             let prev = a.clone();
             for v in 0..nv {
@@ -232,9 +453,17 @@ pub fn band(model: &Model, ctx: &Ctx, w: &Weights, width: f64) -> Weights {
                     continue;
                 }
                 let mean = ns.iter().sum::<f64>() / ns.len() as f64;
-                a[v] = 0.5 * prev[v] + 0.5 * mean;
+                let mut next = 0.5 * prev[v] + 0.5 * mean;
+                if !is_leg && low[v] > 0.50 && limb[v] < 0.08 {
+                    next = next.min(a0[v]);
+                }
+                a[v] = next;
             }
         }
+        let smooth01 = |t: f64| {
+            let x = t.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
         for v in 0..nv {
             if !zone[v] {
                 continue;
@@ -242,7 +471,45 @@ pub fn band(model: &Model, ctx: &Ctx, w: &Weights, width: f64) -> Weights {
             let total = limb[v] + body[v];
             let (nl, nb) = (a[v] * total, (1.0 - a[v]) * total);
             let vw = &mut cur[v];
-            if body[v] > 1e-9 {
+            if !is_leg {
+                // On the arm/armpit side (a > 0.05), lower-torso spine bleed fades
+                // smoothly into shoulder + upper chest instead of pinning the armpit,
+                // while preserving existing shoulder vs chest balance where already present.
+                let keep_low = smooth01((0.30 - a[v]) / 0.25);
+                let low_sum: f64 = vw.iter().filter(|e| lower_torso[e.0 as usize]).map(|e| e.1).sum();
+                let target_low = if body[v] > 1e-9 { (low_sum / body[v]) * nb * keep_low } else { 0.0 };
+                let dropped_low = if body[v] > 1e-9 { (low_sum / body[v]) * nb * (1.0 - keep_low) } else { 0.0 };
+                let rest_body = (nb - target_low).max(0.0);
+                if low_sum > 1e-9 {
+                    let fl = target_low / low_sum;
+                    for e in vw.iter_mut() {
+                        if lower_torso[e.0 as usize] {
+                            e.1 *= fl;
+                        }
+                    }
+                }
+                let other_body: f64 = vw.iter().filter(|e| body_set[e.0 as usize] && !lower_torso[e.0 as usize]).map(|e| e.1).sum();
+                let keep_other = (rest_body - dropped_low).max(0.0);
+                if other_body > 1e-9 {
+                    let f = keep_other / other_body;
+                    for e in vw.iter_mut() {
+                        if body_set[e.0 as usize] && !lower_torso[e.0 as usize] {
+                            e.1 *= f;
+                        }
+                    }
+                }
+                let add_girdle = dropped_low + if other_body <= 1e-9 { keep_other } else { 0.0 };
+                if add_girdle > 0.0 {
+                    if parent != arm_chest {
+                        let sh_w = add_girdle * 0.70;
+                        let ch_w = add_girdle - sh_w;
+                        vw.push((parent, sh_w));
+                        vw.push((arm_chest, ch_w));
+                    } else {
+                        vw.push((parent, add_girdle));
+                    }
+                }
+            } else if body[v] > 1e-9 {
                 let f = nb / body[v];
                 for e in vw.iter_mut() {
                     if body_set[e.0 as usize] {

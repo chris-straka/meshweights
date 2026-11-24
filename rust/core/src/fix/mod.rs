@@ -309,6 +309,7 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     };
     push("original".into(), model.weights.clone(), &mut cands);
     let match_dist = 0.03;
+    let mut pushed_crotch = false;
     for &m in &o.methods {
         match m {
             Method::Smooth => {
@@ -316,6 +317,13 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
                 push("smooth".into(), cleanup(model, ctx, &ev0, true), &mut cands);
                 if o.headline_guard {
                     push("own-bones".into(), own_bones(model, ctx), &mut cands);
+                }
+                let hips_name = model.skel.anatomy.roles.get("hips").and_then(|v| v.first()).map(|&j| model.skel.names[j].as_str());
+                let leg_or_hips_failing = (0..nr)
+                    .any(|r| failing[r] && (ctx.regions[r].name.contains("thigh") || Some(ctx.regions[r].name.as_str()) == hips_name));
+                if leg_or_hips_failing && let Some(wc) = crotch_to_pelvis(model) {
+                    push("crotch-to-pelvis".into(), wc, &mut cands);
+                    pushed_crotch = true;
                 }
             }
             Method::Geodesic => {
@@ -334,6 +342,20 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     // carry no weight in the input); the helper band weights them, alone
     // and refined by optimize (helpers.rs).
     if !model.skel.helpers.is_empty() {
+        let rb = crate::helpers::reassign(&model.skel, &model.weights);
+        if o.methods.contains(&Method::Optimize) {
+            let (ev_r, _) = score(&rb);
+            push("helper-reblend+optimize".into(), optimize(model, ctx, &rb, &ev_r), &mut cands);
+        }
+        push("helper-reblend".into(), rb, &mut cands);
+        for (tag, width) in [("arm-band", 1.0), ("arm-band-narrow", 0.7)] {
+            let aw = crate::helpers::arm_shoulder_band(model, ctx, &model.weights, width);
+            if o.methods.contains(&Method::Optimize) {
+                let (ev_a, _) = score(&aw);
+                push(format!("{tag}+optimize"), optimize(model, ctx, &aw, &ev_a), &mut cands);
+            }
+            push(tag.into(), aw, &mut cands);
+        }
         // How wide an armpit or groin band should be depends on the body
         // and the rig (wider trades stretch for collapse), so three widths
         // are scored and the pick keeps whichever repairs best.
@@ -779,7 +801,7 @@ fn fix_once(file: &str, model: &Model, ctx: &Ctx, o: &FixOpts) -> FixResult {
     // where they actually reduce torn skin, without letting the continuous
     // ROM energy search overwrite symmetric healthy limbs (CesiumMan, MPFB).
     if o.headline_guard && o.methods.contains(&Method::Smooth) {
-        if let Some(wc) = crotch_to_pelvis(model) {
+        if !pushed_crotch && let Some(wc) = crotch_to_pelvis(model) {
             push("crotch-to-pelvis".into(), wc, &mut cands);
         }
         for (name, from_left) in [("mirror-left", true), ("mirror-right", false)] {

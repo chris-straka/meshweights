@@ -130,7 +130,8 @@ pub fn geodesic(model: &Model, ctx: &Ctx) -> Weights {
     let body: Vec<bool> = (0..model.nverts()).map(|v| !is_piece(model, v)).collect();
     let n = passes(model, &body, widths::GEODESIC_SMOOTH * ctx.feature);
     let w = prune_all(&smooth(model, &w, &body, n, 0.5));
-    prune_all(&pieces_from_body(model, ctx, &w))
+    let w = prune_all(&pieces_from_body(model, ctx, &w));
+    crate::helpers::reassign(&model.skel, &w)
 }
 
 /// Method 2b, joint bands: each body vertex belongs to its geodesically
@@ -214,7 +215,8 @@ pub fn joint_bands(model: &Model, ctx: &Ctx) -> Weights {
         .collect();
     let body: Vec<bool> = (0..model.nverts()).map(|v| !is_piece(model, v)).collect();
     let w = prune_all(&smooth(model, &w, &body, 0, 0.5));
-    prune_all(&pieces_from_body(model, ctx, &w))
+    let w = prune_all(&pieces_from_body(model, ctx, &w));
+    crate::helpers::reassign(&model.skel, &w)
 }
 
 /// Skin weighted to a bone it does not belong to (the check's wrong-bone
@@ -264,37 +266,158 @@ pub fn crotch_to_pelvis(model: &Model) -> Option<Weights> {
         return None;
     }
     let top_y = sk.head[thigh[0] as usize].y.max(sk.head[thigh[1] as usize].y);
+    let crotch_y = top_y - 0.65 * half;
+    let blend_w = 1.25 * half;
+    let has_leg = |vw: &VW| vw.iter().any(|&(j, x)| x > 0.0 && leg_of(j as usize).is_some());
+    let lat_of = |v: usize| model.rest[v].dot(left) - mid;
+    let smooth01 = |x: f64| {
+        let t = x.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    // Identify fused skirt / inner-thigh bridges within geodesic `blend_w` of midline crossings.
+    let mut bridge_seed = vec![false; model.nverts()];
+    for e in &model.edges {
+        let (a, b) = (e[0] as usize, e[1] as usize);
+        if model.rest[a].y < top_y
+            && model.rest[b].y < top_y
+            && lat_of(a) * lat_of(b) <= 0.0
+            && lat_of(a).abs() < blend_w
+            && lat_of(b).abs() < blend_w
+            && has_leg(&model.weights[a])
+            && has_leg(&model.weights[b])
+        {
+            for v in [a, b] {
+                if !model.rigid[v] {
+                    bridge_seed[v] = true;
+                }
+            }
+        }
+    }
+    let bridge_dom: Vec<bool> = (0..model.nverts())
+        .map(|v| !model.rigid[v] && model.rest[v].y < top_y && lat_of(v).abs() <= blend_w && has_leg(&model.weights[v]))
+        .collect();
+    let bridge = super::grow(model, &bridge_seed, blend_w, Some(&bridge_dom));
+    // Solve harmonic L/R blend inside `bridge` with separated legs outside `bridge`
+    // pinned to 1.0 (left) and 0.0 (right), keeping <= 4 bones per vertex.
+    let mut l_frac: Vec<f64> = (0..model.nverts())
+        .map(|v| {
+            if bridge[v] {
+                ((lat_of(v) + blend_w) / (2.0 * blend_w)).clamp(0.0, 1.0)
+            } else if lat_of(v) >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    for _ in 0..64 {
+        let prev_l = l_frac.clone();
+        for v in 0..model.nverts() {
+            if !bridge[v] {
+                continue;
+            }
+            let ns = &model.adj[v];
+            if ns.is_empty() {
+                continue;
+            }
+            l_frac[v] = ns.iter().map(|&u| prev_l[u as usize]).sum::<f64>() / ns.len() as f64;
+        }
+    }
+    let thigh_twist: [Option<u32>; 2] = [
+        sk.helpers.iter().find(|h| h.driver == thigh[0] as usize).map(|h| h.joint as u32),
+        sk.helpers.iter().find(|h| h.driver == thigh[1] as usize).map(|h| h.joint as u32),
+    ];
     let mut changed = vec![false; model.nverts()];
     let mut w: Weights = model.weights.clone();
     for v in 0..model.nverts() {
         if model.rigid[v] || model.rest[v].y > top_y {
             continue;
         }
-        if !w[v].iter().any(|&(j, _)| leg_of(j as usize).is_some()) {
+        if !has_leg(&w[v]) {
             continue;
         }
         // The leg it belongs to: the side of the body it is on.
-        let lat = model.rest[v].dot(left) - mid;
+        let lat = lat_of(v);
         let own = if lat >= 0.0 { 0 } else { 1 };
+        if bridge[v] || model.rest[v].y < crotch_y {
+            let mut thigh_sum = 0.0;
+            let mut twist_sum = 0.0;
+            let mut has_other = false;
+            let mut keep: VW = Vec::new();
+            for &(j, x) in &w[v] {
+                let owner_j = crate::helpers::owner(sk, j as usize);
+                if owner_j == thigh[0] as usize || owner_j == thigh[1] as usize {
+                    if owner_j != j as usize {
+                        twist_sum += x;
+                    }
+                    if leg_of(j as usize).is_some_and(|l| l != own) {
+                        has_other = true;
+                    }
+                    thigh_sum += x;
+                } else if leg_of(j as usize).is_some_and(|l| l != own) {
+                    has_other = true;
+                    thigh_sum += x;
+                } else {
+                    keep.push((j, x));
+                }
+            }
+            if thigh_sum > 0.0 && (bridge[v] || has_other) {
+                let tw_frac = (twist_sum / thigh_sum).clamp(0.0, 1.0);
+                if bridge[v] {
+                    let lf = l_frac[v];
+                    for (side, sf) in [(0, lf), (1, 1.0 - lf)] {
+                        let s = thigh_sum * sf;
+                        if let Some(tw) = thigh_twist[side]
+                            && tw_frac > 0.01
+                        {
+                            keep.push((thigh[side], s * (1.0 - tw_frac)));
+                            keep.push((tw, s * tw_frac));
+                        } else {
+                            keep.push((thigh[side], s));
+                        }
+                    }
+                } else if let Some(tw) = thigh_twist[own]
+                    && tw_frac > 0.01
+                {
+                    keep.push((thigh[own], thigh_sum * (1.0 - tw_frac)));
+                    keep.push((tw, thigh_sum * tw_frac));
+                } else {
+                    keep.push((thigh[own], thigh_sum));
+                }
+                w[v] = normalize_vw(keep);
+                changed[v] = true;
+            }
+            continue;
+        }
         let mut other = 0.0;
+        let mut hips_w = 0.0;
         let mut keep: VW = Vec::new();
         for &(j, x) in &w[v] {
             if leg_of(j as usize).is_some_and(|l| l != own) {
                 other += x;
             } else {
+                if j == hips {
+                    hips_w += x;
+                }
                 keep.push((j, x));
             }
         }
-        if other <= 0.0 {
+        if other <= 0.03 {
             continue;
         }
-        // Inside the band a smooth share goes to the pelvis and the other
-        // thigh keeps the rest, fading to nothing at the band's edge; beyond
-        // it, all to the pelvis.
-        let t = (lat.abs() / half).clamp(0.0, 1.0);
-        let stay = 0.5 * (1.0 - t * t * (3.0 - 2.0 * t));
-        keep.push((thigh[1 - own], other * stay));
-        keep.push((hips, other * (1.0 - stay)));
+        // Above the skirt/thigh separation: only send other-leg weight to hips
+        // when the vertex already sits on the pelvis/crotch saddle; otherwise
+        // move wrong-side bleed onto own thigh so pelvis stays un-tethered.
+        let t = (lat.abs() / (0.35 * half)).clamp(0.0, 1.0);
+        let saddle = (1.0 - smooth01(t)) * (hips_w / 0.25).clamp(0.0, 1.0);
+        let to_hips = other * saddle;
+        let to_own = (other - to_hips).max(0.0);
+        if to_hips > 0.0 {
+            keep.push((hips, to_hips));
+        }
+        if to_own > 0.0 {
+            keep.push((thigh[own], to_own));
+        }
         w[v] = normalize_vw(keep);
         changed[v] = true;
     }
@@ -302,7 +425,7 @@ pub fn crotch_to_pelvis(model: &Model) -> Option<Weights> {
         return None;
     }
     let patch = dilate(model, &changed, 1);
-    Some(prune_all(&smooth(model, &w, &patch, 2, 0.5)))
+    Some(prune_all(&smooth(model, &w, &patch, 3, 0.5)))
 }
 
 /// One side's weights mirrored onto the other (`from_left`: the left
