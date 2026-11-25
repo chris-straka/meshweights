@@ -479,234 +479,52 @@ pub fn resolve_report(set: &PoseSet, sk: &Skeleton) -> (Vec<Pose>, Vec<String>) 
     (out, skipped)
 }
 
-const RIGID_CREATURE_TOKENS: &[&str] = &[
-    "eye", "eyeball", "lid", "eyelid", "brow", "pupil", "iris", "horn", "antler", "tusk", "ear", "tooth", "teeth", "tongue", "whisker",
-    "lip", "nose", "snout", "beak", "nostril", "claw", "nail", "hoof", "feather", "quill", "barb", "finlet", "gill", "antenna", "antennae",
-];
-
-fn rest_height(model: &Model) -> f64 {
-    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-    for p in &model.rest {
-        lo = lo.min(p.y);
-        hi = hi.max(p.y);
-    }
-    if hi > lo { hi - lo } else { 1.0 }
-}
-
-fn push_chain_curve(
-    out: &mut Vec<Pose>,
-    sk: &Skeleton,
-    prefix: &str,
-    chain: &[usize],
-    bend_total_deg: f64,
-    per_cap_deg: f64,
-    twist_total_deg: f64,
-) {
-    let valid: Vec<(usize, Vec3)> = chain
-        .iter()
-        .copied()
-        .filter_map(|j| {
-            let d = bone_dir(sk, j);
-            (d.len2() > 0.0).then_some((j, d))
-        })
-        .collect();
-    if valid.is_empty() {
-        return;
-    }
-    let len = valid.len() as f64;
-    let d0 = valid[0].1;
-    let a = d0.any_perp();
-    let b = d0.cross(a).normalized();
-    let per_bend = (bend_total_deg / len).min(per_cap_deg).to_radians();
-    for (tag, axis, ang) in
-        [("bend_a+", a, per_bend), ("bend_a-", a, -per_bend), ("bend_b+", b, per_bend * 0.85), ("bend_b-", b, -per_bend * 0.85)]
-    {
-        let moves: Vec<(usize, Vec3, f64)> = valid.iter().map(|&(j, _)| (j, axis, ang)).collect();
-        out.push(Pose { name: format!("{prefix}_{tag}"), moves, locals: Vec::new() });
-    }
-    if valid.len() >= 3 && twist_total_deg > 0.0 {
-        let per_tw = (twist_total_deg / len).min(8.0).to_radians();
-        for (tag, sgn) in [("twist+", 1.0), ("twist-", -1.0)] {
-            let moves: Vec<(usize, Vec3, f64)> = valid.iter().map(|&(j, d)| (j, d, sgn * per_tw)).collect();
-            out.push(Pose { name: format!("{prefix}_{tag}"), moves, locals: Vec::new() });
-        }
-    }
-}
-
-/// Conservative ROM for non-humanoid skeletons: protects cranial/rigid
-/// protrusions (`eye`, `horn`, `ear`, `beak`, feathers, tiny terminal stubs),
-/// opens `jaw` downward only, and distributes bends smoothly along connected
-/// chains (`angle / chain_len`) instead of applying ±45° per bone.
+/// Generic ROM for skeletons with no known naming: every weighted,
+/// non-root bone bends ±45° about two axes and twists ±45°.
 pub fn generic(model: &Model) -> Vec<Pose> {
-    conservative_uncovered(model, &[])
-}
-
-fn conservative_uncovered(model: &Model, already_covered: &[bool]) -> Vec<Pose> {
     let sk = &model.skel;
-    let n = sk.joints.len();
-    let mut used = vec![0usize; n];
-    let mut vert_mass = vec![0usize; n];
-    let mut total_mass = 0usize;
+    // A bone is worth posing if it carries weight, or if it owns geometry
+    // (nearest bone to >= 1% of vertices) even when the weights ignore it
+    // (a rig with everything on the root must still be exercised).
+    let mut used = vec![0usize; sk.joints.len()];
     for vw in &model.weights {
-        if let Some(&(j, w)) = vw.first()
-            && w > 0.0
-            && (j as usize) < n
-        {
-            vert_mass[j as usize] += 1;
-            total_mass += 1;
-        }
         for &(j, w) in vw {
-            if w > 0.05 && (j as usize) < n {
+            if w > 0.05 {
                 used[j as usize] += 1;
             }
         }
     }
-    let mut territory = vec![0usize; n];
+    let mut territory = vec![0usize; sk.joints.len()];
     for p in &model.rest {
-        let j = (0..n).min_by(|&a, &b| sk.seg_dist(a, *p).total_cmp(&sk.seg_dist(b, *p))).unwrap_or(0);
+        let j = (0..sk.joints.len()).min_by(|&a, &b| sk.seg_dist(a, *p).total_cmp(&sk.seg_dist(b, *p))).unwrap_or(0);
         territory[j] += 1;
     }
     let min_t = (model.nverts() / 100).max(1);
-    for j in 0..n {
+    for j in 0..sk.joints.len() {
         if territory[j] >= min_t {
             used[j] += 1;
         }
     }
-    let h = rest_height(model);
-    let roled: Vec<bool> = {
-        let mut r = vec![false; n];
-        for (role, js) in &sk.anatomy.roles {
-            if role == "head" || role == "jaw" || role == "neck" || crate::anatomy::is_chain_role(role) {
-                for &j in js {
-                    r[j] = true;
-                }
-            }
-        }
-        r
-    };
-    let is_rigid_or_protected = |j: usize| -> bool {
-        if already_covered.get(j).copied().unwrap_or(false) || crate::helpers::helper_of(sk, j).is_some() {
-            return true;
-        }
-        // Protect children of `head` (eyes, horns, antlers, ears, beaks, teeth) unless explicitly neck/head/jaw.
-        if sk.anatomy.group.get(j) == Some(&crate::anatomy::Group::Head) && !roled[j] {
-            return true;
-        }
-        // Protect secondary wing/fin feather branches outside the main structural wing/fin chain.
-        if let Some(crate::anatomy::Group::Limb(name)) = sk.anatomy.group.get(j)
-            && (name.starts_with("wing") || name.starts_with("fin"))
-            && !roled[j]
-        {
-            return true;
-        }
-        if crate::anatomy::has_token(&sk.names[j], RIGID_CREATURE_TOKENS) {
-            return true;
-        }
-        let leaf = sk.jchildren[j].is_empty();
-        let seg_len = (sk.tail[j] - sk.head[j]).len();
-        leaf && total_mass > 0 && vert_mass[j].saturating_mul(60) < total_mass && seg_len < 0.03 * h
-    };
-
     let mut out = Vec::new();
-    // Gentle jaw opening (downward only, never upward through the skull).
-    if let Some(jaw_js) = sk.anatomy.roles.get("jaw")
-        && let Some(&jj) = jaw_js.first()
-        && !already_covered.get(jj).copied().unwrap_or(false)
-    {
-        let d = bone_dir(sk, jj);
-        if d.len2() > 0.0 {
-            let fwd = if sk.anatomy.forward.len2() > 0.0 { sk.anatomy.forward } else { v3(0.0, 0.0, 1.0) };
-            let up = v3(0.0, 1.0, 0.0);
-            let axis = d.cross(-up);
-            let ax = if axis.len() >= 0.15 { axis.normalized() } else { up.cross(fwd).normalized() };
-            out.push(Pose { name: "jaw_open".into(), moves: vec![(jj, ax, 18f64.to_radians())], locals: Vec::new() });
-        }
-    }
-
-    // Radial limbs (e.g. tentacles) get distributed curves + distal half curls.
-    let mut handled = already_covered.to_vec();
-    if handled.len() < n {
-        handled.resize(n, false);
-    }
-    let mut limb_roles: Vec<(&String, &Vec<usize>)> =
-        sk.anatomy.roles.iter().filter(|(r, _)| r.starts_with("limb") && crate::anatomy::is_chain_role(r)).collect();
-    limb_roles.sort_by(|a, b| a.0.cmp(b.0));
-    for (rname, chain) in limb_roles {
-        let base = rname.trim_end_matches('*');
-        if chain.iter().any(|&j| !handled[j]) {
-            push_chain_curve(&mut out, sk, base, chain, 28.0, 16.0, 0.0);
-            if chain.len() >= 4 {
-                push_chain_curve(&mut out, sk, &format!("{base}_tip"), &chain[chain.len() / 2..], 20.0, 12.0, 0.0);
-            }
-            for &j in chain {
-                handled[j] = true;
-            }
-        }
-    }
-
-    // Paired fins (on swimming creatures) get conservative sweeps without wing twists.
-    for side in ["L", "R"] {
-        let rname = format!("fin*.{side}");
-        if let Some(chain) = sk.anatomy.roles.get(&rname)
-            && chain.iter().any(|&j| !handled[j])
-        {
-            push_chain_curve(&mut out, sk, &format!("fin_{side}"), chain, 22.0, 14.0, 0.0);
-            for &j in chain {
-                handled[j] = true;
-            }
-        }
-    }
-
-    // Remaining uncovered active bones: group connected chains rather than per-bone +/-45 deg bends.
-    for j in 0..n {
+    for j in 0..sk.joints.len() {
+        // A hierarchy root moves everything rigidly (nothing to learn); a
+        // childless root in a flat skeleton is a real deforming bone.
         let hierarchy_root = sk.jparent[j].is_none() && !sk.jchildren[j].is_empty();
-        if handled[j] || hierarchy_root || (used[j] == 0 && sk.jchildren[j].iter().all(|&c| used[c] == 0)) || is_rigid_or_protected(j) {
+        if hierarchy_root || used[j] == 0 && sk.jchildren[j].iter().all(|&c| used[c] == 0) {
             continue;
         }
-        // Only start linear chains at chain heads so interior joints are curved smoothly as a chain.
-        let parent_in_same_chain = sk.jparent[j].is_some_and(|p| {
-            let p_root = sk.jparent[p].is_none() && !sk.jchildren[p].is_empty();
-            !p_root && !handled[p] && !is_rigid_or_protected(p) && (used[p] > 0)
-        });
-        if parent_in_same_chain {
+        let d = bone_dir(sk, j);
+        if d.len2() == 0.0 {
             continue;
         }
-        let mut chain = vec![j];
-        let mut cur = j;
-        while let Some(&nxt) = sk.jchildren[cur]
-            .iter()
-            .filter(|&&c| !handled[c] && !is_rigid_or_protected(c) && (used[c] > 0 || sk.jchildren[c].iter().any(|&g| used[g] > 0)))
-            .max_by_key(|&&c| (vert_mass[c] + used[c], std::cmp::Reverse(c)))
+        let a = d.any_perp();
+        let b = d.cross(a).normalized();
+        let n = &sk.names[j];
+        let deg = 45f64.to_radians();
+        for (tag, axis, ang) in
+            [("bend_a+", a, deg), ("bend_a-", a, -deg), ("bend_b+", b, deg), ("bend_b-", b, -deg), ("twist+", d, deg), ("twist-", d, -deg)]
         {
-            chain.push(nxt);
-            cur = nxt;
-            if chain.len() >= n {
-                break;
-            }
-        }
-        for &c in &chain {
-            handled[c] = true;
-        }
-        if chain.len() >= 2 {
-            let tag = &sk.names[j];
-            push_chain_curve(&mut out, sk, tag, &chain, 26.0, 16.0, 18.0);
-            if chain.len() >= 6 {
-                let mid = chain.len() / 2;
-                push_chain_curve(&mut out, sk, &format!("{tag}_prox"), &chain[..mid], 20.0, 12.0, 0.0);
-                push_chain_curve(&mut out, sk, &format!("{tag}_dist"), &chain[mid..], 20.0, 12.0, 0.0);
-            }
-        } else {
-            let d = bone_dir(sk, j);
-            if d.len2() == 0.0 {
-                continue;
-            }
-            let a = d.any_perp();
-            let b = d.cross(a).normalized();
-            let nm = &sk.names[j];
-            let deg = 18f64.to_radians();
-            for (tag, axis, ang) in [("bend_a+", a, deg), ("bend_a-", a, -deg), ("bend_b+", b, deg), ("bend_b-", b, -deg)] {
-                out.push(Pose { name: format!("{nm}_{tag}"), moves: vec![(j, axis, ang)], locals: Vec::new() });
-            }
+            out.push(Pose { name: format!("{n}_{tag}"), moves: vec![(j, axis, ang)], locals: Vec::new() });
         }
     }
     out
@@ -849,8 +667,8 @@ fn clip_sample(model: &Model, how: Sampling) -> Vec<(String, Vec<Pose>)> {
 }
 
 /// Poses for a legged body that is neither a humanoid nor a quadruped:
-/// each leg swings conservatively forward, back and up from its first joint
-/// and bends at its middle one (`anatomy.rs` names them `leg<k>_upper.S`,
+/// each leg swings forward, back and up from its first joint and bends at
+/// its middle one (`anatomy.rs` names them `leg<k>_upper.S`,
 /// `leg<k>_lower.S`).
 pub fn legged_set(sk: &Skeleton) -> PoseSet {
     let mut poses = Vec::new();
@@ -860,7 +678,7 @@ pub fn legged_set(sk: &Skeleton) -> PoseSet {
             continue;
         }
         let side = &role[role.len() - 1..];
-        for (tag, d, a) in [("forward", Dir::Forward, 25.0), ("back", Dir::Back, 25.0), ("up", Dir::Up, 20.0)] {
+        for (tag, d, a) in [("forward", Dir::Forward, 30.0), ("back", Dir::Back, 30.0), ("up", Dir::Up, 25.0)] {
             poses.push(PoseSpec {
                 name: format!("{base}_{tag}.{side}"),
                 mirror: false,
@@ -872,181 +690,11 @@ pub fn legged_set(sk: &Skeleton) -> PoseSet {
             poses.push(PoseSpec {
                 name: format!("{base}_bend.{side}"),
                 mirror: false,
-                moves: vec![Move { bone: lower, motion: Motion::Bend(Dir::In, 30.0) }],
+                moves: vec![Move { bone: lower, motion: Motion::Bend(Dir::In, 40.0) }],
             });
         }
     }
     PoseSet { name: "legged".into(), frame: None, poses }
-}
-
-/// Conservative opposite-phase creature gait and strike keyposes derived from
-/// structural roles (`anatomy.rs`). Keeps left and right limbs in opposite
-/// phases on `walk`/`trot` frames so blind planted swaps never depend solely on
-/// symmetric lunges.
-pub fn creature_gait_poses(model: &Model) -> Vec<Pose> {
-    let sk = &model.skel;
-    let roles = &sk.anatomy.roles;
-    let mut specs = Vec::new();
-    match sk.anatomy.body {
-        crate::anatomy::Body::Humanoid => return Vec::new(),
-        crate::anatomy::Body::Quadruped => {
-            for (name, dir_l, dir_r) in [("gait_walk_L", 1.0, -1.0), ("gait_walk_R", -1.0, 1.0)] {
-                let (fl, fr) = if dir_l > 0.0 { (Dir::Forward, Dir::Back) } else { (Dir::Back, Dir::Forward) };
-                let spine_dir = if dir_l > 0.0 { Dir::Left } else { Dir::Right };
-                let tail_dir = if dir_l > 0.0 { Dir::Right } else { Dir::Left };
-                specs.push(PoseSpec {
-                    name: name.into(),
-                    mirror: false,
-                    moves: vec![
-                        Move { bone: "upper_arm.L".into(), motion: Motion::Bend(fl, 22.0) },
-                        Move { bone: "upper_arm.R".into(), motion: Motion::Bend(fr, 20.0) },
-                        Move { bone: "thigh.R".into(), motion: Motion::Bend(fl, 20.0) },
-                        Move { bone: "thigh.L".into(), motion: Motion::Bend(fr, 18.0) },
-                        Move { bone: "forearm.R".into(), motion: Motion::Bend(Dir::Back, 28.0) },
-                        Move { bone: "shin.L".into(), motion: Motion::Bend(Dir::Back, 25.0) },
-                        Move { bone: "spine*".into(), motion: Motion::Bend(spine_dir, 8.0) },
-                        Move { bone: "tail*".into(), motion: Motion::Bend(tail_dir, 14.0) },
-                    ],
-                });
-                let _ = dir_r;
-            }
-            specs.push(PoseSpec {
-                name: "gait_trot_a".into(),
-                mirror: false,
-                moves: vec![
-                    Move { bone: "upper_arm.L".into(), motion: Motion::Bend(Dir::Forward, 28.0) },
-                    Move { bone: "upper_arm.R".into(), motion: Motion::Bend(Dir::Back, 24.0) },
-                    Move { bone: "thigh.R".into(), motion: Motion::Bend(Dir::Forward, 26.0) },
-                    Move { bone: "thigh.L".into(), motion: Motion::Bend(Dir::Back, 22.0) },
-                    Move { bone: "forearm.L".into(), motion: Motion::Bend(Dir::Back, 20.0) },
-                    Move { bone: "shin.R".into(), motion: Motion::Bend(Dir::Back, 20.0) },
-                    Move { bone: "spine*".into(), motion: Motion::Bend(Dir::Left, 10.0) },
-                    Move { bone: "tail*".into(), motion: Motion::Bend(Dir::Right, 16.0) },
-                ],
-            });
-            specs.push(PoseSpec {
-                name: "gait_lunge".into(),
-                mirror: false,
-                moves: vec![
-                    Move { bone: "upper_arm.L".into(), motion: Motion::Bend(Dir::Back, 16.0) },
-                    Move { bone: "upper_arm.R".into(), motion: Motion::Bend(Dir::Back, 16.0) },
-                    Move { bone: "forearm.L".into(), motion: Motion::Bend(Dir::Back, 30.0) },
-                    Move { bone: "forearm.R".into(), motion: Motion::Bend(Dir::Back, 30.0) },
-                    Move { bone: "thigh.L".into(), motion: Motion::Bend(Dir::Forward, 20.0) },
-                    Move { bone: "thigh.R".into(), motion: Motion::Bend(Dir::Forward, 20.0) },
-                    Move { bone: "spine*".into(), motion: Motion::Bend(Dir::Down, 12.0) },
-                    Move { bone: "neck*".into(), motion: Motion::Bend(Dir::Up, 15.0) },
-                    Move { bone: "jaw".into(), motion: Motion::Bend(Dir::Down, 16.0) },
-                ],
-            });
-            specs.push(PoseSpec {
-                name: "gait_attack".into(),
-                mirror: false,
-                moves: vec![
-                    Move { bone: "upper_arm.L".into(), motion: Motion::Bend(Dir::Forward, 32.0) },
-                    Move { bone: "upper_arm.R".into(), motion: Motion::Bend(Dir::Back, 20.0) },
-                    Move { bone: "spine*".into(), motion: Motion::Bend(Dir::Up, 12.0) },
-                    Move { bone: "neck*".into(), motion: Motion::Bend(Dir::Forward, 18.0) },
-                    Move { bone: "jaw".into(), motion: Motion::Bend(Dir::Down, 18.0) },
-                ],
-            });
-        }
-        crate::anatomy::Body::Legged => {
-            let mut leg_roles: Vec<(usize, String, String)> = Vec::new();
-            for role in roles.keys() {
-                let Some(base) = role.strip_suffix("_upper.L").or_else(|| role.strip_suffix("_upper.R")) else { continue };
-                if let Some(num_s) = base.strip_prefix("leg")
-                    && let Ok(idx) = num_s.parse::<usize>()
-                {
-                    let side = &role[role.len() - 1..];
-                    leg_roles.push((idx, side.to_string(), role.clone()));
-                }
-            }
-            for (name, phase) in [("gait_walk_L", 0usize), ("gait_walk_R", 1usize)] {
-                let mut moves = Vec::new();
-                for (idx, side, role) in &leg_roles {
-                    let fwd = (idx % 2 == phase) ^ (side == "R");
-                    moves.push(Move { bone: role.clone(), motion: Motion::Bend(if fwd { Dir::Forward } else { Dir::Back }, 20.0) });
-                    if fwd {
-                        moves.push(Move { bone: role.clone(), motion: Motion::Bend(Dir::Up, 12.0) });
-                    }
-                }
-                if roles.contains_key("wing*.L") && roles.contains_key("wing*.R") {
-                    moves.push(Move { bone: "wing*.L".into(), motion: Motion::Bend(if phase == 0 { Dir::Up } else { Dir::Down }, 24.0) });
-                    moves.push(Move { bone: "wing*.R".into(), motion: Motion::Bend(if phase == 0 { Dir::Down } else { Dir::Up }, 20.0) });
-                }
-                moves.push(Move { bone: "tail*".into(), motion: Motion::Bend(if phase == 0 { Dir::Left } else { Dir::Right }, 14.0) });
-                specs.push(PoseSpec { name: name.into(), mirror: false, moves });
-            }
-            let mut lunge_moves = vec![
-                Move { bone: "spine*".into(), motion: Motion::Bend(Dir::Down, 12.0) },
-                Move { bone: "neck*".into(), motion: Motion::Bend(Dir::Forward, 15.0) },
-                Move { bone: "jaw".into(), motion: Motion::Bend(Dir::Down, 16.0) },
-            ];
-            if roles.contains_key("wing*.L") && roles.contains_key("wing*.R") {
-                lunge_moves.push(Move { bone: "wing*.L".into(), motion: Motion::Bend(Dir::Back, 20.0) });
-                lunge_moves.push(Move { bone: "wing*.R".into(), motion: Motion::Bend(Dir::Back, 20.0) });
-            }
-            specs.push(PoseSpec { name: "gait_lunge".into(), mirror: false, moves: lunge_moves });
-        }
-        crate::anatomy::Body::Other => {
-            for (name, s_dir, t_dir, f_l, f_r) in [
-                ("swim_wave_L", Dir::Left, Dir::Right, Dir::Back, Dir::Forward),
-                ("swim_wave_R", Dir::Right, Dir::Left, Dir::Forward, Dir::Back),
-            ] {
-                specs.push(PoseSpec {
-                    name: name.into(),
-                    mirror: false,
-                    moves: vec![
-                        Move { bone: "spine*".into(), motion: Motion::Bend(s_dir, 20.0) },
-                        Move { bone: "tail*".into(), motion: Motion::Bend(t_dir, 26.0) },
-                        Move { bone: "fin*.L".into(), motion: Motion::Bend(f_l, 18.0) },
-                        Move { bone: "fin*.R".into(), motion: Motion::Bend(f_r, 18.0) },
-                    ],
-                });
-            }
-            specs.push(PoseSpec {
-                name: "swim_lunge".into(),
-                mirror: false,
-                moves: vec![
-                    Move { bone: "spine*".into(), motion: Motion::Bend(Dir::Down, 14.0) },
-                    Move { bone: "tail*".into(), motion: Motion::Bend(Dir::Up, 18.0) },
-                    Move { bone: "jaw".into(), motion: Motion::Bend(Dir::Down, 18.0) },
-                ],
-            });
-        }
-    }
-    if specs.is_empty() {
-        return Vec::new();
-    }
-    let set = PoseSet { name: "creature_gait".into(), frame: None, poses: specs };
-    let (mut poses, _) = resolve_report(&set, sk);
-    // Keep only poses where at least 2 bones move cleanly (or 1+ on axial creatures).
-    poses.retain(|p| !p.moves.is_empty());
-    poses
-}
-
-fn mark_covered(sk: &Skeleton, poses: &[Pose], include_limbs: bool) -> Vec<bool> {
-    let n = sk.joints.len();
-    let mut covered = vec![false; n];
-    for p in poses {
-        for &(j, _, _) in &p.moves {
-            if j < n {
-                covered[j] = true;
-            }
-        }
-    }
-    if include_limbs {
-        for (j, g) in sk.anatomy.group.iter().enumerate() {
-            if let crate::anatomy::Group::Limb(name) = g
-                && !name.starts_with("limb")
-                && !name.starts_with("fin")
-            {
-                covered[j] = true;
-            }
-        }
-    }
-    covered
 }
 
 /// The default pose set for a model: the class preset (or a user file),
@@ -1057,39 +705,17 @@ pub fn default_poses(model: &Model, user: Option<&PoseSet>, clips: bool) -> (Ske
     let (mut poses, skipped) = match (user, class) {
         (Some(set), _) => resolve_report(set, &model.skel),
         (None, SkelClass::Humanoid) => resolve_report(&parse_pose_set(HUMANOID_RON).expect("built-in humanoid.ron"), &model.skel),
-        (None, SkelClass::Quadruped) => {
-            let (mut p, s) = resolve_report(&parse_pose_set(QUADRUPED_RON).expect("built-in quadruped.ron"), &model.skel);
-            if model.skel.anatomy.roles.contains_key("wing*.L") && model.skel.anatomy.roles.contains_key("wing*.R") {
-                let (wp, _) = resolve_report(&parse_pose_set(WINGED_RON).expect("built-in winged.ron"), &model.skel);
-                p.extend(wp.into_iter().filter(|pose| pose.name.starts_with("wing_")));
-            }
-            let covered = mark_covered(&model.skel, &p, true);
-            p.extend(conservative_uncovered(model, &covered));
-            p.extend(creature_gait_poses(model));
-            (p, s)
-        }
+        (None, SkelClass::Quadruped) => resolve_report(&parse_pose_set(QUADRUPED_RON).expect("built-in quadruped.ron"), &model.skel),
         (None, SkelClass::Legged) => {
             let (mut p, s) = resolve_report(&legged_set(&model.skel), &model.skel);
-            let has_wings = model.skel.anatomy.roles.contains_key("wing*.L") && model.skel.anatomy.roles.contains_key("wing*.R");
-            let ron = if has_wings { WINGED_RON } else { MULTI_LIMB_RON };
-            let (cp, _) = resolve_report(&parse_pose_set(ron).expect("built-in creature ROM"), &model.skel);
-            p.extend(cp);
-            let covered = mark_covered(&model.skel, &p, true);
-            p.extend(conservative_uncovered(model, &covered));
-            p.extend(creature_gait_poses(model));
+            // Bones on no leg (a body, a tail, a neck) still bend.
+            let legs: Vec<usize> =
+                model.skel.anatomy.roles.iter().filter(|(k, _)| k.starts_with("leg")).flat_map(|(_, v)| v.clone()).collect();
+            let on_leg = |j: usize| legs.iter().any(|&l| model.skel.anatomy.group[j] == model.skel.anatomy.group[l]);
+            p.extend(generic(model).into_iter().filter(|g| g.moves.iter().all(|m| !on_leg(m.0))));
             (p, s)
         }
-        (None, SkelClass::Custom) => {
-            let (mut p, _) = resolve_report(&parse_pose_set(MULTI_LIMB_RON).expect("built-in multi_limb.ron"), &model.skel);
-            if model.skel.anatomy.roles.contains_key("wing*.L") && model.skel.anatomy.roles.contains_key("wing*.R") {
-                let (wp, _) = resolve_report(&parse_pose_set(WINGED_RON).expect("built-in winged.ron"), &model.skel);
-                p.extend(wp.into_iter().filter(|pose| pose.name.starts_with("wing_")));
-            }
-            let covered = mark_covered(&model.skel, &p, false);
-            p.extend(conservative_uncovered(model, &covered));
-            p.extend(creature_gait_poses(model));
-            (p, Vec::new())
-        }
+        (None, SkelClass::Custom) => (generic(model), Vec::new()),
     };
     if clips {
         poses.extend(clip_poses(model, 6));

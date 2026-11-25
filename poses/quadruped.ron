@@ -50,22 +50,22 @@ PoseSet(
             Move(bone: "spine*", motion: Twist(20)),
         ]),
         PoseSpec(name: "neck_up", moves: [
-            Move(bone: "neck*", motion: Bend(Up, 25)),
+            Move(bone: "neck", motion: Bend(Up, 30)),
         ]),
         PoseSpec(name: "neck_down", moves: [
-            Move(bone: "neck*", motion: Bend(Down, 30)),
+            Move(bone: "neck", motion: Bend(Down, 35)),
         ]),
         PoseSpec(name: "neck_side", mirror: true, moves: [
-            Move(bone: "neck*", motion: Bend(Left, 30)),
+            Move(bone: "neck", motion: Bend(Left, 35)),
         ]),
         PoseSpec(name: "head_turn", mirror: true, moves: [
-            Move(bone: "head", motion: Twist(25)),
+            Move(bone: "head", motion: Twist(30)),
         ]),
         PoseSpec(name: "tail_side", mirror: true, moves: [
-            Move(bone: "tail*", motion: Bend(Left, 35)),
+            Move(bone: "tail*", motion: Bend(Left, 45)),
         ]),
         PoseSpec(name: "tail_up", moves: [
-            Move(bone: "tail*", motion: Bend(Up, 35)),
+            Move(bone: "tail*", motion: Bend(Up, 40)),
         ]),
     ],
 )

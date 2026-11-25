@@ -663,7 +663,7 @@ fn quadruped_with_low_drooping_tail_and_heavy_neck_preserves_hind_legs_and_neck_
 }
 
 #[test]
-fn deep_55_to_107_bone_creatures_use_conservative_chain_rom_without_over_rotation() {
+fn deep_55_to_107_bone_creatures_keep_the_full_45_degree_generic_rom() {
     let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
     // Build a 64-bone winged + horned + jawed + deep-tailed creature (Body::Legged):
     // spine (4), neck (4), head (1), jaw (1), 2 horns x 3, 2 eyes (2),
@@ -748,20 +748,21 @@ fn deep_55_to_107_bone_creatures_use_conservative_chain_rom_without_over_rotatio
     assert_eq!(checked.model.skel.anatomy.body, Body::Legged);
     assert!(checked.model.skel.anatomy.roles.contains_key("wing*.L"));
     assert!(checked.model.skel.anatomy.roles.contains_key("jaw"));
-    // Every pose must remain conservative (no 45-degree per-bone sweeps on horns/eyes/feathers).
-    for p in &checked.ctx.poses {
-        for &(j, _, rad) in &p.moves {
-            let bname = &checked.model.skel.names[j];
-            assert!(
-                !bname.contains("horn") && !bname.contains("eye") && !bname.contains("feather"),
-                "protected bone {bname} posed in {}",
-                p.name
-            );
-            assert!(rad.to_degrees().abs() <= 36.0 + 1e-6, "pose {} over-rotated {bname} by {:.1} deg", p.name, rad.to_degrees());
-        }
+    // The range of motion is a stress test: small bones (horns, eyes,
+    // feathers) are posed like any other weighted bone, each ±45°, so a rig
+    // that tears there shows it. Softening this hides tears (2026-11-24).
+    let posed_45 = |token: &str| {
+        checked.ctx.poses.iter().any(|p| {
+            p.moves.iter().any(|&(j, _, rad)| checked.model.skel.names[j].contains(token) && (rad.to_degrees().abs() - 45.0).abs() < 1e-6)
+        })
+    };
+    for token in ["horn", "eye", "feather", "tail", "neck"] {
+        assert!(
+            posed_45(token),
+            "no ±45° pose on a {token} bone; poses: {:?}",
+            checked.ctx.poses.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
     }
-    let poses_sec = checked.rep.headline.iter().find(|s| s.name == "poses").unwrap();
-    assert_eq!(poses_sec.tears_pct, 0.0, "clean 60+ bone creature had pose tears: {:?}", poses_sec.findings);
 
     // Built-in creature gait synthesis produces walk, trot, lunge, attack clips on deep creatures cleanly.
     let gaits = check_full_with_gait(&path, &CtxOpts::default(), &MotionSpec::default(), true).unwrap();
@@ -806,17 +807,14 @@ fn deep_55_to_107_bone_creatures_use_conservative_chain_rom_without_over_rotatio
     .unwrap();
     let scheck = check_full(&spath, &CtxOpts::default(), &MotionSpec::default()).unwrap();
     assert_eq!(scheck.model.skel.anatomy.body, Body::Other);
+    // Every weighted, non-root segment bends and twists ±45° on its own.
+    let mut per_bone_45 = std::collections::BTreeSet::new();
     for p in &scheck.ctx.poses {
         for &(j, _, rad) in &p.moves {
-            let max_deg = if p.name.starts_with("head_") || j == 0 { 25.0 } else { 18.0 };
-            assert!(
-                rad.to_degrees().abs() <= max_deg + 1e-6,
-                "serpent pose {} bone {} over-rotated by {:.1} deg",
-                p.name,
-                scheck.model.skel.names[j],
-                rad.to_degrees()
-            );
+            if p.moves.len() == 1 && (rad.to_degrees().abs() - 45.0).abs() < 1e-6 {
+                per_bone_45.insert(j);
+            }
         }
     }
-    assert_eq!(scheck.rep.headline.iter().find(|s| s.name == "poses").unwrap().tears_pct, 0.0);
+    assert!(per_bone_45.len() >= 60, "only {} of 74 serpent bones get ±45° poses", per_bone_45.len());
 }

@@ -1,9 +1,9 @@
 // weightforge winged creature range-of-motion set.
 //
-// Roles come from structural anatomy (`anatomy.rs`): wing*.L/R and
-// wing_mid.L/R spread wing arcs smoothly over primary joints without
-// twisting individual feather bones. Angles stay conservative for
-// deep 55-107 bone artist and generated creature rigs.
+// Opt-in only (`weights check --poses poses/winged.ron`). Roles come from
+// structural anatomy (`anatomy.rs`): wing*.L/R and wing_mid.L/R spread
+// wing arcs over primary joints without twisting feather bones. It is not
+// part of the default range of motion and must not stand in for it.
 PoseSet(
     name: "winged",
     poses: [

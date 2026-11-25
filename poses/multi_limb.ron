@@ -1,8 +1,10 @@
 // weightforge multi-limb creature range-of-motion set.
 //
-// Torso, neck, head, and tail moves for multi-legged / radial creatures;
-// leg and radial limb chains are added structurally per detected leg or
-// tentacle chain in `poses::legged_set` / `poses::conservative_creature`.
+// Opt-in only (`weights check --poses poses/multi_limb.ron`): soft torso,
+// neck, head and tail moves for multi-legged / radial creatures. It is not
+// the default: `weights check` keeps `legged_set` plus the ±45° per-bone
+// generic range for every bone off the legs, and a softer set here must
+// never be passed off as that gate.
 PoseSet(
     name: "multi_limb",
     poses: [
