@@ -269,12 +269,12 @@ pub fn cmd_blind(a: &Args) -> ExitCode {
         let (lo, _) = wf::blind::talk_frame_span();
         let in_frame: Vec<usize> = (0..rest.len()).filter(|&i| (rest[i].y - floor) / h >= lo).collect();
         let mut best = (planted_pose, -1.0f64);
-        for i in 0..ctxa.mats.len() {
-            let a_ = wf::skin::lbs(&ca.model, &ctxa.mats[i], &ca.model.weights);
+        for (i, mats) in ctxa.mats.iter().enumerate() {
+            let a_ = wf::skin::lbs(&ca.model, mats, &ca.model.weights);
             if wf::blind::head_share(rest, &a_) < 0.6 {
                 continue;
             }
-            let p_ = wf::skin::lbs(&ca.model, &ctxa.mats[i], &planted_w);
+            let p_ = wf::skin::lbs(&ca.model, mats, &planted_w);
             let d: f64 = in_frame.iter().map(|&v| (p_[v] - a_[v]).len()).sum();
             if d > best.1 {
                 best = (i, d);
