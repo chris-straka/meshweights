@@ -11,9 +11,9 @@ Standalone, engine-agnostic skin-weight QA and repair for rigged character and c
 | [`blind.md`](blind.md) | Same-frame game-camera blind pair protocol (`blind` / `blind-score`), control & planted-swap gates, score retirement |
 | [`pick-and-bands.md`](pick-and-bands.md) | Exact branch-and-bound region picking (`pick.rs`) and metric limb-radius repair bands |
 
-## Creature calibration & blind checks
+## Creature calibration status
 
-Non-humanoid QA supports anatomy-keyed ROM presets (`poses/quadruped.ron`, `poses/winged.ron`, `poses/multi_limb.ron`), chain-distributed conservative bends for deep spine/tail/wing/fin/tentacle skeletons, optional neutral creature gait clips (`--gait`: `walk`, `trot`, `lunge`, `attack`), opposite-phase asymmetric blind planted-swap selection (`asymmetric_stride` fallback when poses are symmetric), and raw pre-`fix` calibration enforcement (`bench/creature_calib.py --require-raw`); see [`rig-score.md`](rig-score.md#creature-calibration-benchcreature_calibpy) and [`blind.md`](blind.md).
+The creature gate (`bench/creature_calib.py --score`) is **FAIL** on its last real run (2026-11-20); the default range of motion is ±45° per weighted bone for bodies without a preset, and the blind planted case is one mirrored role pair at its worst tearing frame. Raw pre-`fix` enforcement (`--require-raw`) and opt-in gait clips (`--gait`) exist. Held-out sets score a change once and are never used to tune it. See [`rig-score.md`](rig-score.md#creature-calibration-benchcreature_calibpy) and [`blind.md`](blind.md).
 
 ## Archived R&D and gate logs (`archive/`)
 

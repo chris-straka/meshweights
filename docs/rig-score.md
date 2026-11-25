@@ -168,26 +168,54 @@ blind control and planted-swap gates pass, raw pre-`fix` checks pass (under
 `--require-raw`), and the blind judge agrees with tears on at least 80% of
 judged claims.
 
-#### Historical pre-calibration runs (2026-11-20, `meshweights-1`, fleet `j92vghq2`)
+#### Real-corpus calibration runs (2026-11-20, `meshweights-1`, fleet `j92vghq2`)
 
-Measured prior to creature ROM calibration (`weights` cut-cell geodesic graph,
-post-`meshweights-8`, golden `105/105` on fleet `9avuccsq`) across two creature sets:
+Measured with `weights` on the cut-cell geodesic graph (post-`meshweights-8`
+split, `fix_golden.sh --check` 105/105 on fleet `9avuccsq`) across two
+real creature sets, each judged by a fresh blind visual judge before
+opening answer keys. This is the last real run; nothing since has
+re-measured it, so these numbers stand.
 
-1. **Standard dev calibration (12 Quaternius/Khronos artist animals vs 5 pre-fixed bench creatures, poses only — bench refs were rigged `--no-clips`):**
+1. **Standard dev calibration (12 Quaternius/Khronos artist animals vs 5 bench creatures, poses only — bench refs were rigged `--no-clips`):**
    - Medians (poses tears %): **Artist `3.83%`** < **Generated before `fix` `4.24%`** → **after `fix` `2.62%`** (`0/5` worse; separation **PASS**). Artist clips median: `2.91%`.
-   - Blind game-camera gates (40 pairs): **`5/5` controls PASS**, **`5/5` planted swaps caught by eye and tears**, **`0/30` non-control/non-planted claims visibly distinct** (`cant_tell` on all 30 because the 5 bench refs were already pre-fixed, leaving only sub-pixel edits and `total_claims == 0`).
-2. **Held-out calibration (12 frozen non-Quaternius CC0/CC-BY held-out artists vs 3 pre-fixed held-out creatures from `meshweights-heldout`):**
+   - Blind game-camera gates (40 pairs): **`5/5` controls PASS**, **`5/5` planted swaps caught by eye and tears (`planted_ok` + `planted_tears_ok`)**, **`0/30` non-control/non-planted claims visibly distinct** (`cant_tell` on all 30 — the 5 bench refs were already pre-fixed by the creature route, so a second `weights fix` pass produces sub-pixel differences at 75° / 3.0 m).
+   - Overall `creature_calib.py --score` gate: **FAIL** (`total_claims == 0`, cannot establish `>= 80%` claim agreement on already-fixed refs; raw un-fixed creature rigs are needed to generate visible before/after claims).
+2. **Held-out calibration (12 frozen non-Quaternius CC0/CC-BY held-out artists from `skintokens-1` vs 3 frozen held-out creatures from `meshweights-heldout`):**
    - Medians (**clips** tears %): **Artist `0.47%`** < **Generated before `fix` `2.59%`** → **after `fix` `1.96%`** (`0/3` worse; **5.5x clips separation PASS**).
    - Medians (**poses** tears %): **Artist `4.92%`** >= **Generated before `fix` `4.54%`** → **after `fix` `1.52%`** (`0/3` worse; **poses separation FAIL**).
-   - Blind game-camera gates (23 pairs): **`3/3` controls PASS**, **`3/3` planted swaps flagged by tears**, **`2/3` planted swaps caught by eye** (`creature_02` missed on a symmetric `attack@0.53s` lunge under a thick mane), **`0/17` claims visibly distinct** (`total_claims == 0`).
-   - **Pre-calibration diagnosis:** Generic ±45° per-bone sweeps inverted poses on 55–107 bone artist rigs (`bee_dense` `30.08%`, `shark_dense` `12.44%`, `eagle` `7.39%`, `panda` `7.00%`), `attack@0.53s` hid maned quadruped planted swaps, and pre-fixed generated inputs yielded sub-pixel claims.
+   - Blind game-camera gates (23 pairs): **`3/3` controls PASS**, **`3/3` planted swaps flagged by tears**, **`2/3` planted swaps caught by eye** (`creature_02` missed on a symmetric `attack@0.53s` lunge under a thick mane, matching `docs/blind.md`), **`0/17` claims visibly distinct** (`cant_tell`).
+   - Overall `creature_calib.py --score` gate: **FAIL** (poses separation failed, `creature_02` planted eye miss, `total_claims == 0`).
+   - **Actionable checker finding:** Real-clip tears cleanly separate hand-made non-Quaternius animals (`0.47%` median; `kaiju`, `m2m_dragon`, `m2m_snake`, `m2m_spider`, `octopus_dense`, `whale` all `0.00%`) from generated creatures (`2.59%`), whereas generic 45° poses bend every joint of 55–107 bone artist rigs (`bee_dense` `30.08%`, `shark_dense` `12.44%`, `eagle` `7.39%`, `panda` `7.00%`) blindly and invert the median. Calibrating creature tears reliably requires creature-specific clips/ROM poses and raw (pre-`weights fix`) generated creature inputs.
 
-#### Creature ROM, anatomy & gait calibration
+#### Held-out sets are for scoring, not tuning
+
+Two sets are frozen for scoring a finished change once: the 12 held-out
+artist animals (from `skintokens-1`) and the 5 rigs in `bench/held_out.json`. Range-of-motion poses, planted
+swaps and blind frame choice are tuned on the dev set only (the 12
+Quaternius/Khronos animals and the 5 bench creatures), then run once on
+the held-out sets. A change whose design came from a held-out failure has
+to be re-derived on the dev set before its held-out run counts.
+
+2026-11-25: the 11-22..24 changes that were tuned on held-out failures
+were undone: the softened creature range of motion (18° single bends,
+26° chain spreads, unposed eye/horn/ear/claw/feather and small leaf
+bones, softer leg and quadruped angles), the whole-limb-chain planted
+swap, planted frames picked by pixel difference, and the synthesized
+`asymmetric_stride` frame. None was measured on a real run. The default
+range of motion is again ±45° bend and twist per weighted bone for
+bodies without a preset, `poses/quadruped.ron` at its 11-20 angles, and
+30°/25° leg swings with 40° lower-leg bends on other legged bodies. The
+planted case is again one mirrored role pair shown at the frame where it
+tears most. Tests pin each (`creature_clips.rs`
+`deep_55_to_107_bone_creatures_keep_the_full_45_degree_generic_rom`,
+`tests/blind.rs` `planted_swap_is_one_role_pair_at_its_worst_tearing_frame`).
+
+#### Creature anatomy and gait clips
 
 - **Structural creature anatomy (`anatomy.rs`):** Unpaired midline drooping chains (`DEF-tail.*`) are pruned before leg selection so heavy low tails never evict hind legs; quadruped anterior ribcage segments stay in `spine*`/`Torso` while `neck` and `head` separate cleanly even when neck mass exceeds skull mass; level-spine winged bipeds classify as `Legged` instead of `Humanoid`; structural roles cover `wing*.L/R`, `fin*.L/R`, `jaw`, and radial `limbK*` tentacles.
-- **Conservative creature ROM (`poses/*.ron`, `poses.rs`):** Replaces brute-force ±45° single-bone sweeps with `poses/quadruped.ron`, `poses/winged.ron`, and `poses/multi_limb.ron`, plus conservative chain-distributed bends (`angle / chain_len`) for deep spine/tail/fin/tentacle chains, downward-only `jaw` opening, protection for cranial/rigid protrusions (`eye`, `horn`, `ear`, `beak`, feathers, tiny terminal leaves), and conservative opposite-phase gait keyposes.
-- **Neutral gait clips (`motion::creature_gait_clips`, `--gait`):** Synthesizes anatomy-driven `walk`, `trot`, `lunge`, and `attack` clips for clip-less non-humanoids when `--motion` is absent and `--gait` is passed.
-- **Next empirical gate:** Re-run `bench/creature_calib.py --require-raw` end-to-end with raw un-fixed auto-rigged creature outputs (the frozen held-out creatures in `meshweights-heldout` are pre-fixed) for full blind claim agreement measurement.
+- **Neutral gait clips (`motion::creature_gait_clips`, `--gait`):** Synthesizes anatomy-driven `walk`, `trot`, `lunge`, and `attack` clips for clip-less non-humanoids when `--motion` is absent and `--gait` is passed. Opt-in; it adds a clip group and never replaces the range of motion.
+- `poses/winged.ron` and `poses/multi_limb.ron` are softer opt-in presets (`--poses`), not the default.
+- **Next empirical gate:** Re-run `bench/creature_calib.py --require-raw` end-to-end with raw un-fixed auto-rigged creature outputs (the frozen held-out creatures in `meshweights-heldout` are pre-fixed), tuned on the dev set and run once on the held-out sets. Until then the creature gate is **FAIL**.
 
 ## Known limits
 
@@ -197,10 +225,10 @@ post-`meshweights-8`, golden `105/105` on fleet `9avuccsq`) across two creature 
   nor a game-skeleton rebuild in Blender poses like the rig does in
   Blender; five of ten read as humanoids after the rebuild. Their numbers
   measure those files as a game would play them, not the rigs.
-- Four-legged and other bodies run conservative range-of-motion poses by
-  default when the file carries no animations; pass `--gait` (built-in
-  creature `walk`, `trot`, `lunge`, `attack`) or `--motion <clips.glb>` to
-  score continuous locomotion clips on un-animated creatures.
+- Four-legged and other bodies get no clips by default (the reference
+  clips target humanoids); their default headline is on the poses. Pass
+  `--gait` (built-in creature `walk`, `trot`, `lunge`, `attack`) or
+  `--motion <clips.glb>` to add a clip group on un-animated creatures.
 - Quaternius animals weight their hooves to IK foot bones under the root:
   bending a leg leaves the hoof behind. That is reported (wrong bone);
   their own clips would key those bones.

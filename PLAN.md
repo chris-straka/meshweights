@@ -100,18 +100,27 @@ worse than what came in.
 | P4 | Real assets: 10+ auto-rigged characters (humanoid + creature), SkinTokens candidate | Report per asset; judged in blind picture pairs at the game camera ([`docs/blind.md`](docs/blind.md)), ≥8/10 rated better or equal |
 | P5 | Blender extension + weight-gate CLI integration (`weights check`, then `fix` on failure) | End-to-end headless Blender + CLI run: faulted rig fails check → fixed → passes, with before/after sheets |
 
-## Non-human & quadruped calibration
+## Non-human & quadruped calibration roadmap
 
-Implemented across [`docs/rig-score.md`](docs/rig-score.md#creature-calibration-benchcreature_calibpy)
-and [`docs/blind.md`](docs/blind.md#asymmetric--non-human-planted-swap-frames):
+Real-clip tears already separate hand-made artist animals from generated
+creatures, but the creature gate is **FAIL** on its last real run
+(2026-11-20, `docs/rig-score.md`): ±45° per-bone poses tear deep
+55–107 bone artist rigs, and pre-fixed creature inputs give sub-pixel
+claims. Raw pre-`fix` inputs (`creature_calib.py --require-raw`) and the
+opt-in `--gait` clips exist. A softer default range of motion and an
+easier planted case were tried on 2026-11-22..24, tuned on held-out
+failures and never measured; both were undone on 2026-11-25. Next:
 
-- Anatomy-keyed creature ROM presets (`poses/quadruped.ron`, `poses/winged.ron`,
-  `poses/multi_limb.ron`), chain-distributed conservative bends, rigid/cranial
-  protection, and built-in `--gait` locomotion clips (`walk`, `trot`, `lunge`, `attack`).
-- Raw pre-`fix` calibration workflow in `bench/creature_calib.py` (`raw.glb` discovery,
-  pre-fixed sub-pixel detection, `--require-raw`, `--gait`).
-- Asymmetric opposite-phase blind planted-swap frame selection and `asymmetric_stride`
-  synthesis in `blind.rs` / `cmd/blind.rs`.
+1. **Creature range of motion:** derive any change from the dev set (12
+   Quaternius/Khronos animals, 5 bench creatures) and show it on a real
+   run before it replaces the ±45° default; the held-out sets score it
+   once.
+2. **Raw pre-`fix` generated creatures:** run `creature_calib.py
+   --require-raw` on un-fixed auto-rigged creatures so `fix` makes visible
+   claims.
+3. **Planted swaps the judge can see:** the planted case stays one mirrored
+   role pair at its worst tearing frame; where the judge misses it, report
+   that as a finding rather than choosing a frame that makes it easier.
 
 ## Rules
 

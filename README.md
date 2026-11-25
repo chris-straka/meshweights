@@ -13,9 +13,10 @@ a hand that follows the thigh, a cape on the wrong bone, speckled
 weights), repairs only `JOINTS_0`/`WEIGHTS_0`, and proves the result with
 numbers and before/after renders.
 
-Status: humanoid and creature QA (quadruped, winged, multi-limb, and axial
-bodies), repair, and asymmetric game-camera blind judging are in active use
-alongside the Blender extension
+Status: humanoid QA, repair, and game-camera blind judging are in active
+use alongside the Blender extension. Creature QA is not calibrated: its
+gate (`bench/creature_calib.py --score`) is **FAIL** on the last real run
+(2026-11-20, fleet `j92vghq2`) and has not been re-run
 ([`docs/rig-score.md`](docs/rig-score.md#creature-calibration-benchcreature_calibpy)).
 Documentation index: [`docs/README.md`](docs/README.md).
 Spec & roadmap: [`PLAN.md`](PLAN.md). Archived gates:
@@ -103,11 +104,11 @@ Bone roles come from the skeleton's structure, not names (`core/src/anatomy.rs`)
 feet are chains ending at the floor, legs climb from them, arms reach
 farthest to each side of the spine, the head owns the crown; sides come
 from position. Humanoids get `poses/humanoid.ron`, four-legged bodies
-`poses/quadruped.ron`, winged and multi-limb bodies `poses/winged.ron` and
-`poses/multi_limb.ron` alongside conservative chain-distributed curves
-and cranial/rigid protection (`eye`, `horn`, `ear`, `beak`, feathers), plus
-built-in opposite-phase gait keyposes and optional `--gait` locomotion clips
-(`walk`, `trot`, `lunge`, `attack`) when `--motion` is absent
+`poses/quadruped.ron`, other legged bodies leg swings and bends, anything
+else per-bone bends (±45° bend and twist on every weighted bone, small
+ones included). No clips by default unless supplied with `--motion`;
+`--gait` adds built-in creature locomotion clips (`walk`, `trot`,
+`lunge`, `attack`) as an extra group
 ([`docs/rig-score.md`](docs/rig-score.md#creature-calibration-benchcreature_calibpy)).
 Every skin of the file is read; a mesh parented to a
 bone without a skin is checked riding it (never written); each bone's
