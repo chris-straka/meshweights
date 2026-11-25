@@ -122,19 +122,3 @@ pub fn format_sub_err(label: &str, out: &std::process::Output) -> String {
     let msg = cmd_err(out);
     if msg.is_empty() { format!("{label} ({})", out.status) } else { format!("{label} ({}): {msg}", out.status) }
 }
-
-pub fn image_rmse(a: &wf::render::Image, b: &wf::render::Image) -> f64 {
-    if a.w != b.w || a.h != b.h || a.rgb.len() != b.rgb.len() || a.rgb.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f64 = a
-        .rgb
-        .iter()
-        .zip(&b.rgb)
-        .map(|(&x, &y)| {
-            let d = x as f64 - y as f64;
-            d * d
-        })
-        .sum();
-    (sum_sq / a.rgb.len() as f64).sqrt()
-}

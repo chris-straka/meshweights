@@ -529,298 +529,8 @@ sys.exit(2)
     let _ = std::fs::remove_dir_all(&d);
 }
 
-fn f32_bytes(xs: &[f32]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(xs.len() * 4);
-    for x in xs {
-        b.extend_from_slice(&x.to_le_bytes());
-    }
-    b
-}
-
-fn build_dark_game_clips_glb(fault: &str, with_clips: bool) -> Vec<u8> {
-    use weightforge_core::fixtures;
-    use weightforge_core::math::{Quat, Vec3, v3};
-
-    let mut glb = fixtures::to_glb(&fixtures::build(fault));
-    let mat_idx = glb.json["materials"].as_array().map_or(0, |a| a.len());
-    glb.json["materials"] = serde_json::json!([
-        {"name": "dark_tunic", "pbrMetallicRoughness": {"baseColorFactor": [0.22, 0.24, 0.28, 1.0]}}
-    ]);
-    if let Some(meshes) = glb.json["meshes"].as_array_mut() {
-        for m in meshes {
-            if let Some(prims) = m["primitives"].as_array_mut() {
-                for p in prims {
-                    p["material"] = serde_json::json!(mat_idx);
-                }
-            }
-        }
-    }
-    if with_clips {
-        type Track = (usize, Vec3, f64, f64, bool);
-        type Clip<'a> = (&'a str, f64, &'a [Track]);
-        let nodes = glb.json["nodes"].as_array().unwrap().clone();
-        let node_of = |name: &str| nodes.iter().position(|n| n["name"].as_str() == Some(name)).unwrap();
-        let clips: &[Clip<'_>] = &[
-            (
-                "walk",
-                1.0,
-                &[
-                    (node_of("DEF-upper_arm.L"), v3(1.0, 0.0, 0.0), 35.0, 0.0, false),
-                    (node_of("DEF-upper_arm.R"), v3(1.0, 0.0, 0.0), 35.0, std::f64::consts::PI, false),
-                    (node_of("DEF-thigh.L"), v3(1.0, 0.0, 0.0), 40.0, std::f64::consts::PI, false),
-                    (node_of("DEF-thigh.R"), v3(1.0, 0.0, 0.0), 40.0, 0.0, false),
-                ],
-            ),
-            (
-                "run",
-                0.8,
-                &[
-                    (node_of("DEF-upper_arm.L"), v3(1.0, 0.0, 0.0), 45.0, 0.0, false),
-                    (node_of("DEF-upper_arm.R"), v3(1.0, 0.0, 0.0), 45.0, std::f64::consts::PI, false),
-                    (node_of("DEF-thigh.L"), v3(1.0, 0.0, 0.0), 55.0, std::f64::consts::PI, false),
-                    (node_of("DEF-thigh.R"), v3(1.0, 0.0, 0.0), 55.0, 0.0, false),
-                ],
-            ),
-            (
-                "attack_1",
-                0.8,
-                &[
-                    (node_of("DEF-upper_arm.L"), v3(0.0, 0.0, 1.0), 55.0, 0.0, false),
-                    (node_of("DEF-upper_arm.R"), v3(1.0, 0.0, 0.0), 35.0, std::f64::consts::PI, false),
-                    (node_of("DEF-forearm.L"), v3(1.0, 0.0, 0.0), 45.0, 0.0, false),
-                ],
-            ),
-            ("dodge", 0.8, &[(node_of("DEF-thigh.L"), v3(1.0, 0.0, 0.0), 35.0, 0.0, false)]),
-            ("hit", 0.6, &[(node_of("DEF-spine.002"), v3(1.0, 0.0, 0.0), 20.0, 0.0, false)]),
-            (
-                // Supine death collapse: torso pitched 85 deg so body lies down,
-                // arms tucked inward across chest so upper-arm swap tears huge area
-                // while looking collapsed/ambiguous at follow camera distance.
-                "death",
-                1.0,
-                &[
-                    (node_of("DEF-spine"), v3(1.0, 0.0, 0.0), 85.0, 0.0, true),
-                    (node_of("DEF-upper_arm.L"), v3(0.0, 0.0, 1.0), 40.0, 0.0, true),
-                    (node_of("DEF-upper_arm.R"), v3(0.0, 0.0, 1.0), -40.0, 0.0, true),
-                    (node_of("DEF-thigh.L"), v3(1.0, 0.0, 0.0), 35.0, 0.0, true),
-                    (node_of("DEF-thigh.R"), v3(1.0, 0.0, 0.0), 35.0, 0.0, true),
-                ],
-            ),
-        ];
-        let mut anims = Vec::new();
-        for &(name, dur, tracks) in clips {
-            let nkeys = 9usize;
-            let times: Vec<f32> = (0..nkeys).map(|i| (dur * i as f64 / (nkeys - 1) as f64) as f32).collect();
-            let tv = glb.append_view(&f32_bytes(&times), None).unwrap();
-            let ta = glb
-                .push_accessor(serde_json::json!({
-                    "bufferView": tv,
-                    "componentType": 5126,
-                    "count": nkeys,
-                    "type": "SCALAR",
-                    "min": [times[0]],
-                    "max": [times[nkeys - 1]],
-                }))
-                .unwrap();
-            let mut samplers = Vec::new();
-            let mut channels = Vec::new();
-            for &(node, axis, peak_deg, phase, ramp) in tracks {
-                let r = nodes[node]["rotation"].as_array().unwrap();
-                let rest_q =
-                    Quat { x: r[0].as_f64().unwrap(), y: r[1].as_f64().unwrap(), z: r[2].as_f64().unwrap(), w: r[3].as_f64().unwrap() }
-                        .normalized();
-                let mut vals = Vec::with_capacity(nkeys * 4);
-                for i in 0..nkeys {
-                    let u = i as f64 / (nkeys - 1) as f64;
-                    let ang =
-                        if ramp { peak_deg.to_radians() * u } else { peak_deg.to_radians() * (std::f64::consts::TAU * u + phase).sin() };
-                    let q = (rest_q * Quat::from_axis_angle(axis.normalized(), ang)).normalized();
-                    vals.extend_from_slice(&[q.x as f32, q.y as f32, q.z as f32, q.w as f32]);
-                }
-                let vv = glb.append_view(&f32_bytes(&vals), None).unwrap();
-                let va = glb
-                    .push_accessor(serde_json::json!({
-                        "bufferView": vv,
-                        "componentType": 5126,
-                        "count": nkeys,
-                        "type": "VEC4",
-                    }))
-                    .unwrap();
-                let si = samplers.len();
-                samplers.push(serde_json::json!({"input": ta, "interpolation": "LINEAR", "output": va}));
-                channels.push(serde_json::json!({"sampler": si, "target": {"node": node, "path": "rotation"}}));
-            }
-            anims.push(serde_json::json!({"name": name, "channels": channels, "samplers": samplers}));
-        }
-        glb.json["animations"] = serde_json::json!(anims);
-    }
-    glb.sync_buffer_len().unwrap();
-    glb.to_bytes()
-}
-
 #[test]
-fn blind_follow_planted_exceeds_gk_rmse_gate_with_clips_and_dark_paint() {
-    let d = tmp("blind_follow_gate");
-    let a = d.join("clean_dark.glb");
-    let b = d.join("bleed_dark.glb");
-    let motion = d.join("hero_clips.glb");
-    std::fs::write(&a, build_dark_game_clips_glb("clean", false)).unwrap();
-    std::fs::write(&b, build_dark_game_clips_glb("bleed", false)).unwrap();
-    std::fs::write(&motion, build_dark_game_clips_glb("clean", true)).unwrap();
-
-    let metrics = d.join("metrics.ron");
-    std::fs::write(&metrics, r#"{"camera": {"distance": 3.0, "focus": 1.535, "fov": 75.0}}"#).unwrap();
-
-    // Enforce the exact `_tools/gk/src/blind.rs` planted RMSE > 5.0 check on the staged PNGs.
-    let fake_gk = d.join("gk");
-    let rmse_log = d.join("rmse.txt");
-    std::fs::write(
-        &fake_gk,
-        format!(
-            r#"#!/usr/bin/env python3
-import json, math, os, shutil, struct, sys, zlib
-
-def read_png_rgb(path):
-    raw = open(path, "rb").read()
-    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
-    pos = 8
-    w = h = None
-    idat = bytearray()
-    while pos < len(raw):
-        ln, ctype = struct.unpack(">I4s", raw[pos:pos+8])
-        data = raw[pos+8:pos+8+ln]
-        pos += 12 + ln
-        if ctype == b"IHDR":
-            w, h, bd, ct, _, _, _ = struct.unpack(">IIBBBBB", data)
-            assert bd == 8 and ct == 2, (bd, ct)
-        elif ctype == b"IDAT":
-            idat.extend(data)
-        elif ctype == b"IEND":
-            break
-    dec = zlib.decompress(bytes(idat))
-    stride = w * 3
-    prev = bytearray(stride)
-    out = bytearray()
-    idx = 0
-    for _ in range(h):
-        flt = dec[idx]
-        idx += 1
-        row = bytearray(dec[idx:idx+stride])
-        idx += stride
-        if flt == 1:
-            for i in range(3, stride):
-                row[i] = (row[i] + row[i - 3]) & 0xFF
-        elif flt == 2:
-            for i in range(stride):
-                row[i] = (row[i] + prev[i]) & 0xFF
-        elif flt == 3:
-            for i in range(stride):
-                left = row[i - 3] if i >= 3 else 0
-                row[i] = (row[i] + ((left + prev[i]) >> 1)) & 0xFF
-        elif flt == 4:
-            for i in range(stride):
-                a = row[i - 3] if i >= 3 else 0
-                b = prev[i]
-                c = prev[i - 3] if i >= 3 else 0
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                pr = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
-                row[i] = (row[i] + pr) & 0xFF
-        elif flt != 0:
-            raise AssertionError(f"unsupported filter {{flt}}")
-        out.extend(row)
-        prev = row
-    return w, h, out
-
-sub = sys.argv[2]
-assert sub == "make", sys.argv
-a_dir = sys.argv[sys.argv.index("--a") + 1]
-b_dir = sys.argv[sys.argv.index("--b") + 1]
-out_dir = sys.argv[sys.argv.index("--out") + 1]
-planted = sys.argv[sys.argv.index("--planted") + 1]
-seed = int(sys.argv[sys.argv.index("--seed") + 1])
-q = sys.argv[sys.argv.index("--question") + 1]
-imgs = sorted(f for f in os.listdir(a_dir) if f.endswith(".png"))
-wa, ha, pa = read_png_rgb(os.path.join(a_dir, imgs[0]))
-wp, hp, pp = read_png_rgb(planted)
-assert (wa, ha) == (wp, hp)
-sq = sum((x - y) * (x - y) for x, y in zip(pa, pp))
-pr = math.sqrt(sq / len(pa))
-open({:?}, "w").write(f"{{pr:.4f}}\n")
-if pr <= 5.0:
-    print(f"gk blind: the planted bad case barely differs from the good picture (RMSE {{pr:.2f}}); a judge cannot be failed by it")
-    sys.exit(1)
-os.makedirs(out_dir, exist_ok=True)
-pub, key = [], []
-n = 0
-for name in imgs:
-    n += 1
-    pid = f"pair-{{n:02d}}"
-    shutil.copyfile(os.path.join(a_dir, name), os.path.join(out_dir, f"{{pid}}-left.png"))
-    shutil.copyfile(os.path.join(b_dir, name), os.path.join(out_dir, f"{{pid}}-right.png"))
-    shutil.copyfile(os.path.join(a_dir, name), os.path.join(out_dir, f"{{pid}}.png"))
-    pub.append({{"id": pid, "left": f"{{pid}}-left.png", "right": f"{{pid}}-right.png", "sheet": f"{{pid}}.png"}})
-    key.append({{"id": pid, "kind": "claim", "claim": os.path.splitext(name)[0], "left": "a", "rmse": 10.0}})
-n += 1
-pid = f"pair-{{n:02d}}"
-shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}-left.png"))
-shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}-right.png"))
-shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}.png"))
-pub.append({{"id": pid, "left": f"{{pid}}-left.png", "right": f"{{pid}}-right.png", "sheet": f"{{pid}}.png"}})
-key.append({{"id": pid, "kind": "control", "claim": os.path.splitext(imgs[0])[0] + " (control)", "left": "a", "rmse": 0.0}})
-n += 1
-pid = f"pair-{{n:02d}}"
-shutil.copyfile(os.path.join(a_dir, imgs[0]), os.path.join(out_dir, f"{{pid}}-left.png"))
-shutil.copyfile(planted, os.path.join(out_dir, f"{{pid}}-right.png"))
-shutil.copyfile(planted, os.path.join(out_dir, f"{{pid}}.png"))
-pub.append({{"id": pid, "left": f"{{pid}}-left.png", "right": f"{{pid}}-right.png", "sheet": f"{{pid}}.png"}})
-key.append({{"id": pid, "kind": "planted", "claim": os.path.splitext(imgs[0])[0] + " (planted)", "left": "a", "rmse": pr}})
-json.dump({{"version": 1, "question": q, "answers": "one of left | right | cant_tell per pair", "pairs": pub}}, open(os.path.join(out_dir, "judge.json"), "w"))
-json.dump({{"version": 1, "seed": seed, "question": q, "pairs": key}}, open(out_dir + ".key.json", "w"))
-"#,
-            rmse_log.display()
-        ),
-    )
-    .unwrap();
-    Command::new("chmod").arg("+x").arg(&fake_gk).status().unwrap();
-
-    let out = d.join("follow");
-    let o = Command::new(bin())
-        .args([
-            "blind",
-            a.to_str().unwrap(),
-            b.to_str().unwrap(),
-            "--out",
-            out.to_str().unwrap(),
-            "--motion",
-            motion.to_str().unwrap(),
-            "--camera",
-            "follow",
-            "--metrics",
-            metrics.to_str().unwrap(),
-            "--seed",
-            "20261118",
-        ])
-        .env("GK_BIN", &fake_gk)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&o.stdout);
-    let stderr = String::from_utf8_lossy(&o.stderr);
-    let measured_rmse = std::fs::read_to_string(&rmse_log).unwrap_or_default();
-    assert_eq!(o.status.code(), Some(0), "follow blind failed (planted rmse={measured_rmse}):\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    let pr: f64 = measured_rmse.trim().parse().unwrap();
-    assert!(pr > 5.0, "expected planted RMSE > 5.0, got {pr}");
-    let key: serde_json::Value = serde_json::from_slice(&std::fs::read(d.join("follow.key.json")).unwrap()).unwrap();
-    let planted_pair = key["pairs"].as_array().unwrap().iter().find(|p| p["category"] == "planted").unwrap();
-    assert!(
-        !planted_pair["frame"].as_str().unwrap().starts_with("death@"),
-        "planted follow pair should pick an upright visible pose, not supine death: {planted_pair}"
-    );
-    let _ = std::fs::remove_dir_all(&d);
-}
-
-#[test]
-fn symmetric_only_blind_synthesizes_asymmetric_stride_and_gait_flag_runs() {
+fn planted_stays_one_role_on_an_input_frame_and_gait_flag_runs() {
     let d = tmp("sym_blind_and_gait");
     let ds = d.to_str().unwrap();
     assert_eq!(run(&["fixture", "all", "--out", ds]).0, 0);
@@ -829,7 +539,8 @@ fn symmetric_only_blind_synthesizes_asymmetric_stride_and_gait_flag_runs() {
     let metrics = d.join("metrics.ron");
     std::fs::write(&metrics, r#"{"camera": {"distance": 3.0, "fov": 75.0}}"#).unwrap();
 
-    // Purely symmetric ROM poses (arms move identically forward -> mirror-symmetric planted difference ~0 without synthesis).
+    // Purely symmetric ROM poses: the planted case must still be shown on
+    // this input frame, never on a stride made up for it.
     let sym_poses = d.join("sym.ron");
     std::fs::write(
         &sym_poses,
@@ -848,7 +559,7 @@ fn symmetric_only_blind_synthesizes_asymmetric_stride_and_gait_flag_runs() {
     let vj: serde_json::Value = serde_json::from_str(&out_gait).unwrap();
     assert_eq!(vj["class"], "humanoid");
 
-    // Reuse minimal fake gk tool to inspect blind planted frame synthesized from symmetric-only poses.
+    // A minimal fake gk that records the planted picture's RMSE without judging it.
     let fake_gk = d.join("gk");
     let rmse_log = d.join("rmse.txt");
     std::fs::write(
@@ -886,7 +597,6 @@ imgs = sorted(f for f in os.listdir(a_dir) if f.endswith('.png'))
 pa = read_png(os.path.join(a_dir, imgs[0])); pp = read_png(pl)
 pr = math.sqrt(sum((x-y)*(x-y) for x, y in zip(pa, pp)) / len(pa))
 open({:?}, 'w').write(f'{{pr:.4f}}\n')
-assert pr > 5.0, pr
 os.makedirs(out_dir, exist_ok=True)
 pairs = [{{'id':'pair-01','kind':'control','claim':os.path.splitext(imgs[0])[0],'left':'a','rmse':0.0}},
          {{'id':'pair-02','kind':'planted','claim':os.path.splitext(imgs[0])[0],'left':'a','rmse':pr}}]
@@ -921,6 +631,8 @@ json.dump({{'version':1,'pairs':pairs}}, open(out_dir + '.key.json', 'w'))
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     let key: serde_json::Value = serde_json::from_slice(&std::fs::read(d.join("sym_blind.key.json")).unwrap()).unwrap();
     let planted_pair = key["pairs"].as_array().unwrap().iter().find(|p| p["category"] == "planted").unwrap();
-    assert_eq!(planted_pair["frame"], "asymmetric_stride", "{planted_pair}");
+    assert_eq!(planted_pair["frame"], "both_arms_fwd", "planted must sit on an input frame: {planted_pair}");
+    // One mirrored role pair, not a whole limb chain with its helpers.
+    assert_eq!(key["planted"], "the left and right upper_arm weights were swapped", "{}", key["planted"]);
     let _ = std::fs::remove_dir_all(&d);
 }
