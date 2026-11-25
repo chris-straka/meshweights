@@ -112,7 +112,7 @@ easier planted case were tried on 2026-11-22..24, tuned on held-out
 failures and never measured; both were undone on 2026-11-25. Next:
 
 1. **Creature range of motion:** derive any change from the dev set (12
-   Quaternius/Khronos animals, 5 bench creatures) and show it on a real
+   dev artist animals, 5 bench creatures) and show it on a real
    run before it replaces the ±45° default; the held-out sets score it
    once.
 2. **Raw pre-`fix` generated creatures:** run `creature_calib.py

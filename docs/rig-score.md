@@ -191,8 +191,8 @@ re-measured it, so these numbers stand.
 
 Two sets are frozen for scoring a finished change once: the 12 held-out
 artist animals (from `skintokens-1`) and the 5 rigs in `bench/held_out.json`. Range-of-motion poses, planted
-swaps and blind frame choice are tuned on the dev set only (the 12
-Quaternius/Khronos animals and the 5 bench creatures), then run once on
+swaps and blind frame choice are tuned on the dev set only (the 12 dev
+artist animals and the 5 bench creatures), then run once on
 the held-out sets. A change whose design came from a held-out failure has
 to be re-derived on the dev set before its held-out run counts.
 
