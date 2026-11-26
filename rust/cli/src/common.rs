@@ -26,6 +26,28 @@ pub fn write_json_pretty(out: &Path, res: serde_json::Result<String>) -> Result<
     std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))
 }
 
+/// Writes a batch of output files; if any write fails, removes every file
+/// created by earlier entries so no half-written outputs remain on disk.
+pub fn write_files_clean(files: &[(&Path, &[u8])]) -> Result<(), String> {
+    let mut created: Vec<&Path> = Vec::with_capacity(files.len());
+    for &(path, bytes) in files {
+        let existed = path.exists();
+        if let Err(e) = std::fs::write(path, bytes) {
+            if !existed {
+                let _ = std::fs::remove_file(path);
+            }
+            for p in created.into_iter().rev() {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(format!("{}: {e}", path.display()));
+        }
+        if !existed {
+            created.push(path);
+        }
+    }
+    Ok(())
+}
+
 pub fn print_json_pretty(res: serde_json::Result<String>) -> Result<(), String> {
     let text = res.map_err(|e| format!("json: {e}"))?;
     println!("{text}");

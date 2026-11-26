@@ -119,6 +119,10 @@ pub struct Model {
     /// skin's joint list (an invalid file), and the largest such index.
     /// Those weights are dropped and the rest renormalised on load.
     pub bad_joints: (usize, u32),
+    /// Welded vertices whose raw `WEIGHTS_n` accessor carried any non-finite
+    /// value (`NaN`, `+Inf`, or `-Inf`) in any slot. Those vertices are
+    /// cleared to unweighted so `check` flags them `D_UNWEIGHTED`.
+    pub bad_weights: usize,
 }
 
 fn vec3_of(v: Option<&Value>, d: Vec3) -> Vec3 {
@@ -167,6 +171,56 @@ pub fn parse_nodes(glb: &Glb) -> Vec<Node> {
         }
     }
     nodes
+}
+
+fn parse_f64_array<const N: usize>(node: &Value, idx: usize, name: &str, field: &str) -> Result<Option<[f64; N]>> {
+    let Some(val) = node.get(field) else { return Ok(None) };
+    let Some(arr) = val.as_array() else {
+        return err(format!("node {idx} '{name}': {field} must be an array of {N} finite numbers"));
+    };
+    if arr.len() != N {
+        return err(format!("node {idx} '{name}': {field} must have {N} elements (got {})", arr.len()));
+    }
+    let mut out = [0.0; N];
+    for (k, elem) in arr.iter().enumerate() {
+        let Some(x) = elem.as_f64().filter(|x| x.is_finite()) else {
+            return err(format!("node {idx} '{name}': {field}[{k}] is not a finite number"));
+        };
+        out[k] = x;
+    }
+    Ok(Some(out))
+}
+
+pub fn try_parse_nodes(glb: &Glb) -> Result<Vec<Node>> {
+    let raw = glb.arr("nodes");
+    let mut nodes = Vec::with_capacity(raw.len());
+    for (i, n) in raw.iter().enumerate() {
+        let name = n.get("name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("node{i}"));
+        let t = match parse_f64_array::<3>(n, i, &name, "translation")? {
+            Some([x, y, z]) => v3(x, y, z),
+            None => Vec3::ZERO,
+        };
+        let s = match parse_f64_array::<3>(n, i, &name, "scale")? {
+            Some([x, y, z]) => v3(x, y, z),
+            None => v3(1.0, 1.0, 1.0),
+        };
+        let r = match parse_f64_array::<4>(n, i, &name, "rotation")? {
+            Some([x, y, z, w]) => Quat { x, y, z, w }.normalized(),
+            None => Quat::IDENTITY,
+        };
+        let matrix = parse_f64_array::<16>(n, i, &name, "matrix")?.map(|a| Mat4::from_cols_slice(&a));
+        nodes.push(Node { name, parent: None, t, r, s, matrix });
+    }
+    for (i, n) in raw.iter().enumerate() {
+        if let Some(ch) = n.get("children").and_then(Value::as_array) {
+            for c in ch.iter().filter_map(Value::as_u64) {
+                if let Some(nd) = nodes.get_mut(c as usize) {
+                    nd.parent = Some(i);
+                }
+            }
+        }
+    }
+    Ok(nodes)
 }
 
 pub fn topo_order(nodes: &[Node]) -> Vec<usize> {
@@ -329,7 +383,20 @@ impl Skeleton {
             anatomy: Default::default(),
         };
         sk.tail = sk.estimate_tails();
+        sk.validate_bone_geometry()?;
         Ok(sk)
+    }
+
+    fn validate_bone_geometry(&self) -> Result<()> {
+        for j in 0..self.joints.len() {
+            let h = self.head[j];
+            let t = self.tail[j];
+            let len = self.bone_len(j);
+            if let Some(bad) = [h.x, h.y, h.z, t.x, t.y, t.z, len].into_iter().find(|x| !x.is_finite()) {
+                return err(format!("joint {j} '{}': bone geometry is not finite ({bad})", self.names[j]));
+            }
+        }
+        Ok(())
     }
 
     /// glTF stores no bone tails, so each joint's is decided on its own
@@ -755,7 +822,7 @@ impl Model {
     }
 
     pub fn from_glb(glb: Glb) -> Result<Model> {
-        let nodes = parse_nodes(&glb);
+        let nodes = try_parse_nodes(&glb)?;
         let (joint_nodes, ibm, skins) = read_skins(&glb, &nodes)?;
         let mut skel = Skeleton::build(&glb, nodes, joint_nodes, ibm)?;
         let mut node_joint = vec![None; skel.nodes.len()];
@@ -791,6 +858,7 @@ impl Model {
         let mut acc_w: Vec<Vec<VW>> = Vec::new(); // raw weight copies per welded vertex (skin-local joints)
         let mut vskin: Vec<Option<usize>> = Vec::new();
         let mut bad_joint: Vec<bool> = Vec::new(); // per welded vertex
+        let mut bad_weight: Vec<bool> = Vec::new(); // per welded vertex
         let mut bad_joint_max = 0u32;
         let mut seen_mesh = std::collections::BTreeSet::new();
 
@@ -904,6 +972,7 @@ impl Model {
                 };
                 let mut raw_w: Vec<VW> = vec![Vec::new(); pos.len()];
                 let mut raw_bad = vec![false; pos.len()];
+                let mut raw_bad_weight = vec![false; pos.len()];
                 for &(ja, wa) in &sets {
                     let (_, jv) = glb.read_f64(ja)?;
                     let (_, wv) = glb.read_f64(wa)?;
@@ -914,6 +983,10 @@ impl Model {
                         for c in 0..4 {
                             let j_raw = jv[v * 4 + c];
                             let w = wv[v * 4 + c];
+                            if !w.is_finite() {
+                                raw_bad_weight[v] = true;
+                                continue;
+                            }
                             if w > 0.0 {
                                 if j_raw.is_finite() && j_raw >= 0.0 && (j_raw as u64) < snj as u64 {
                                     raw_w[v].push((j_raw as u32, w));
@@ -953,9 +1026,11 @@ impl Model {
                         vskin.push(skin);
                         acc_w.push(Vec::new());
                         bad_joint.push(false);
+                        bad_weight.push(false);
                         (bind.len() - 1) as u32
                     });
                     bad_joint[id as usize] |= raw_bad[v];
+                    bad_weight[id as usize] |= raw_bad_weight[v];
                     acc_w[id as usize].push(normalize_vw(std::mem::take(&mut raw_w[v])));
                     raw_to_weld.push(id);
                 }
@@ -986,12 +1061,18 @@ impl Model {
         if bind.is_empty() {
             return err("no skinned primitives (JOINTS_0/WEIGHTS_0) in file");
         }
+        if tris.is_empty() {
+            return err("no triangles in skinned meshes (nothing to check)");
+        }
         let mut seam_split = Vec::new();
         // Welded weights, still in each skin's own joint numbering.
         let local_w: Weights = acc_w
             .into_iter()
             .enumerate()
             .map(|(i, copies)| {
+                if bad_weight[i] {
+                    return Vec::new();
+                }
                 if copies.len() == 1 {
                     return copies.into_iter().next().unwrap_or_default();
                 }
@@ -1034,6 +1115,7 @@ impl Model {
             })
             .collect();
         skel.link_flat(&rest, &weights);
+        skel.validate_bone_geometry()?;
         skel.anatomy = crate::anatomy::analyze(&skel, &rest, &weights);
         let mut lo = v3(f64::MAX, f64::MAX, f64::MAX);
         let mut hi = -lo;
@@ -1047,7 +1129,26 @@ impl Model {
         }
         let (edges, adj) = build_edges(bind.len(), &tris);
         let bad_joints = (bad_joint.iter().filter(|&&b| b).count(), bad_joint_max);
-        Ok(Model { glb, skel, skins, parts, prims, bind, rest, tris, vpart, rigid, weights, seam_split, edges, adj, scale, bad_joints })
+        let bad_weights = bad_weight.iter().filter(|&&b| b).count();
+        Ok(Model {
+            glb,
+            skel,
+            skins,
+            parts,
+            prims,
+            bind,
+            rest,
+            tris,
+            vpart,
+            rigid,
+            weights,
+            seam_split,
+            edges,
+            adj,
+            scale,
+            bad_joints,
+            bad_weights,
+        })
     }
 
     /// Puts back the file's own weights on rigid-parented vertices: those
@@ -1154,8 +1255,11 @@ impl Model {
             for (ri, &wi) in prim.raw_to_weld.iter().enumerate() {
                 if let Some(raw) = &prim.raw_rows {
                     // Rows holding an index past the skin's joints (dropped
-                    // on load) are written afresh, never copied.
-                    let valid = raw[ri].0.iter().zip(&raw[ri].1).all(|(&j, &x)| x <= 0.0 || (j as usize) < self.skins[k].joints.len());
+                    // on load) or any non-finite weight are written afresh,
+                    // never copied.
+                    let valid = raw[ri].0.iter().all(|j| j.is_finite())
+                        && raw[ri].1.iter().all(|x| x.is_finite())
+                        && raw[ri].0.iter().zip(&raw[ri].1).all(|(&j, &x)| x <= 0.0 || (j as usize) < self.skins[k].joints.len());
                     if valid && w[wi as usize] == self.weights[wi as usize] && !self.seam_split.contains(&wi) {
                         jrows.push(raw[ri].0);
                         wrows.push(raw[ri].1);

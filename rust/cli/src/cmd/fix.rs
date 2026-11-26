@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use weightforge_core as wf;
 
 use crate::args::{Args, ctx_opts, load_poses, motion_spec};
-use crate::common::{fail, fails, write_json_pretty, write_png};
+use crate::common::{fail, fails, write_files_clean};
 
 /// The ML candidate: SkinTokens weights for the input's own skeleton
 /// (`skintokens skin` via `SKINTOKENS_BIN` or `PATH`). Err = the tool is
@@ -31,7 +31,7 @@ fn skintokens_candidate(input: &str) -> Result<Option<wf::scene::Model>, String>
         .stdout(std::process::Stdio::null())
         .status()
         .map_err(|e| format!("{}: {e}", bin.display()))?;
-    let model = if status.success() { wf::scene::Model::load(&out).ok() } else { None };
+    let model = if status.success() { wf::scene::Model::load(&out).ok().filter(|m| m.bad_weights == 0) } else { None };
     if model.is_none() {
         let why = std::fs::read_to_string(&report).unwrap_or_default();
         eprintln!("weights: skintokens candidate skipped ({status}) {}", why.trim());
@@ -59,6 +59,9 @@ pub fn cmd_fix(a: &Args) -> ExitCode {
         Ok(m) => m,
         Err(e) => return fail(e),
     };
+    if model.bad_weights > 0 {
+        return fail(format!("{input}: {} vertex(es) have non-finite skin weights", model.bad_weights));
+    }
     // A body whose fused legs were cut apart (an upstream unfuse pass
     // records the cut): the repair starts from each half following its own
     // leg. The writer keeps the file's own bytes for every vertex whose
@@ -74,9 +77,14 @@ pub fn cmd_fix(a: &Args) -> ExitCode {
         };
         model.weights = w;
     }
-    let source = match a.get("--source").map(|p| wf::scene::Model::load(Path::new(p))) {
-        Some(Ok(m)) => Some(m),
-        Some(Err(e)) => return fail(format!("--source: {e}")),
+    let source = match a.get("--source") {
+        Some(p) => match wf::scene::Model::load(Path::new(p)) {
+            Ok(m) if m.bad_weights > 0 => {
+                return fail(format!("--source {p}: {} vertex(es) have non-finite skin weights", m.bad_weights));
+            }
+            Ok(m) => Some(m),
+            Err(e) => return fail(format!("--source: {e}")),
+        },
         None => None,
     };
     let mut externals = Vec::new();
@@ -92,6 +100,9 @@ pub fn cmd_fix(a: &Args) -> ExitCode {
             name = format!("{}/{name}", dir.to_string_lossy());
         }
         match wf::scene::Model::load(Path::new(p)) {
+            Ok(m) if m.bad_weights > 0 => {
+                return fail(format!("--candidate {p}: {} vertex(es) have non-finite skin weights", m.bad_weights));
+            }
             Ok(m) => externals.push((name, m)),
             Err(e) => return fail(format!("--candidate {p}: {e}")),
         }
@@ -139,19 +150,17 @@ pub fn cmd_fix(a: &Args) -> ExitCode {
         Ok(b) => b,
         Err(e) => return fail(format!("{out}: {e}")),
     };
-    if let Err(e) = std::fs::write(out, glb_bytes) {
-        return fail(format!("{out}: {e}"));
-    }
     let report_path = a.get("--report").map(str::to_string).unwrap_or_else(|| {
         let p = Path::new(out);
         p.with_file_name(format!("{}.report.json", p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()))
             .to_string_lossy()
             .into_owned()
     });
-    if let Err(e) = write_json_pretty(Path::new(&report_path), serde_json::to_string_pretty(&res.fix)) {
-        return fail(e);
-    }
-    if let Some(sheet_path) = a.get("--sheet") {
+    let report_text = match serde_json::to_string_pretty(&res.fix) {
+        Ok(t) => t,
+        Err(e) => return fail(format!("{report_path}: json: {e}")),
+    };
+    let sheet_bytes = if let Some(sheet_path) = a.get("--sheet") {
         let (rb, ra) = (&res.report_before, &res.report_after);
         let ev0 = wf::metrics::evaluate(&model, &ctx, &model.weights);
         let (ma, mb) = (wf::report::finding_mask(&ctx, &ev0, rb), wf::report::finding_mask(&ctx, &res.eval, ra));
@@ -171,9 +180,20 @@ pub fn cmd_fix(a: &Args) -> ExitCode {
             w: &res.weights,
             info: wf::render::SheetInfo { title: &tb, mask: &mb, score: ra.score, tears: 0.0, pass: ra.pass, fails: fails(ra) },
         };
-        if let Err(e) = write_png(Path::new(sheet_path), &wf::render::compare(&sa, &sb, &wf::render::SheetOpts::default())) {
-            return fail(e);
+        let img = wf::render::compare(&sa, &sb, &wf::render::SheetOpts::default());
+        match img.try_png_bytes() {
+            Ok(b) => Some((sheet_path, b)),
+            Err(e) => return fail(format!("{sheet_path}: {e}")),
         }
+    } else {
+        None
+    };
+    let mut outputs: Vec<(&Path, &[u8])> = vec![(Path::new(out), &glb_bytes), (Path::new(&report_path), report_text.as_bytes())];
+    if let Some((sheet_path, bytes)) = &sheet_bytes {
+        outputs.push((Path::new(sheet_path), bytes));
+    }
+    if let Err(e) = write_files_clean(&outputs) {
+        return fail(e);
     }
     let f = &res.fix;
     println!(

@@ -12,6 +12,9 @@ pub fn cmd_dump(a: &Args) -> ExitCode {
         Ok(m) => m,
         Err(e) => return fail(e),
     };
+    if model.bad_weights > 0 {
+        return fail(format!("{input}: {} vertex(es) have non-finite skin weights", model.bad_weights));
+    }
     let meshes: Vec<serde_json::Value> = model
         .raw_meshes()
         .into_iter()

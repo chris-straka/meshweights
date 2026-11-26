@@ -43,6 +43,9 @@ pub fn cmd_check(a: &Args) -> ExitCode {
             return fail(e);
         }
     }
+    if model.bad_weights > 0 {
+        eprintln!("weights: {input}: {} vertex(es) have non-finite skin weights", model.bad_weights);
+    }
     if a.has("--json") {
         if let Err(e) = print_json_pretty(serde_json::to_string_pretty(&rep)) {
             return fail(e);

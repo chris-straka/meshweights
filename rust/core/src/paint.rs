@@ -33,6 +33,9 @@ fn decode_png(bytes: &[u8]) -> Option<Image> {
     let mut buf = vec![0u8; r.output_buffer_size()?];
     let info = r.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width as usize, info.height as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
     let ch = match info.color_type {
         png::ColorType::Rgb => 3,
         png::ColorType::Rgba => 4,
@@ -56,11 +59,12 @@ fn decode_png(bytes: &[u8]) -> Option<Image> {
 }
 
 fn image_bytes<'a>(model: &'a Model, img: &Value) -> Option<&'a [u8]> {
-    let bv = img.get("bufferView")?.as_u64()? as usize;
+    let bv = usize::try_from(img.get("bufferView")?.as_u64()?).ok()?;
     let v = model.glb.arr("bufferViews").get(bv)?;
-    let off = v.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let len = v.get("byteLength")?.as_u64()? as usize;
-    model.glb.bin.get(off..off + len)
+    let off = usize::try_from(v.get("byteOffset").and_then(Value::as_u64).unwrap_or(0)).ok()?;
+    let len = usize::try_from(v.get("byteLength")?.as_u64()?).ok()?;
+    let end = off.checked_add(len)?;
+    model.glb.bin.get(off..end)
 }
 
 pub fn read(model: &Model) -> Paint {
